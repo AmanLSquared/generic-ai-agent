@@ -18,6 +18,9 @@ class DashboardCreate(BaseModel):
     html: str
     json_schema: dict
     asana_workspace_id: str | None = None
+    asana_scope_type: str | None = None   # "project" | "user"
+    asana_scope_gid: str | None = None
+    asana_scope_name: str | None = None
 
 
 class DashboardUpdate(BaseModel):
@@ -45,6 +48,9 @@ async def create_dashboard(req: DashboardCreate, db: AsyncSession = Depends(get_
         json_schema=json.dumps(req.json_schema),
         embed_code=embed_code,
         asana_workspace_id=req.asana_workspace_id,
+        asana_scope_type=req.asana_scope_type,
+        asana_scope_gid=req.asana_scope_gid,
+        asana_scope_name=req.asana_scope_name,
     )
     db.add(dashboard)
     await db.commit()
@@ -142,6 +148,9 @@ def _serialize(d: Dashboard) -> dict:
         "json_schema": json.loads(d.json_schema),
         "embed_code": d.embed_code,
         "asana_workspace_id": d.asana_workspace_id,
+        "asana_scope_type": d.asana_scope_type,
+        "asana_scope_gid": d.asana_scope_gid,
+        "asana_scope_name": d.asana_scope_name,
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "updated_at": d.updated_at.isoformat() if d.updated_at else None,
     }

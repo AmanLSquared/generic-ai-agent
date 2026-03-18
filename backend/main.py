@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
-from database import init_db, AsyncSessionLocal
+from database import init_db, migrate_db, AsyncSessionLocal
 from models import Dashboard
 from routes import dashboards, generate, asana, settings as settings_router
 
@@ -15,6 +15,7 @@ from routes import dashboards, generate, asana, settings as settings_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await migrate_db()
     yield
 
 

@@ -31,10 +31,11 @@ export default function Home() {
   const [savedId, setSavedId] = useState(null)
   const [lastJsonData, setLastJsonData] = useState(null)
   const [lastJsonSchema, setLastJsonSchema] = useState(null)
+  const [lastAsanaScope, setLastAsanaScope] = useState(null) // { type, gid, name }
 
   const isFirstMessage = messages.length === 0
 
-  const handleSend = async (text, jsonData) => {
+  const handleSend = async (text, jsonData, asanaScope) => {
     const userContent = text || (jsonData ? 'Generate a dashboard from this data.' : '')
     if (!userContent && !jsonData) return
 
@@ -49,17 +50,22 @@ export default function Home() {
     if (jsonData) {
       setLastJsonData(jsonData)
       setLastJsonSchema(extractSchema(jsonData))
+      setLastAsanaScope(asanaScope || null)
     }
 
     try {
       let html
       if (isFirstMessage || !currentHtml) {
+        // First generation: pass whatever JSON is active (new or persisted)
         const res = await generateDashboard(userContent, activeJson)
         html = res.html
       } else {
         const chatMessages = newMessages.map(m => ({ role: m.role, content: m.content }))
-        // Pass activeJson so the AI keeps the current data in context for refinements
-        const res = await continueDashboard(chatMessages, currentHtml, activeJson)
+        // Continuation: only pass NEW json uploaded in this message.
+        // For pure refinements ("change theme", "add chart") pass null —
+        // DASHBOARD_DATA is already embedded inside current_html; re-sending
+        // the full JSON on every turn bloats the context and causes truncated responses.
+        const res = await continueDashboard(chatMessages, currentHtml, jsonData || null)
         html = res.html
       }
       setCurrentHtml(html)
@@ -78,11 +84,19 @@ export default function Home() {
     const name = autoName(messages[0]?.content || 'Dashboard')
     const schema = lastJsonSchema || {}
     try {
-      const saved = await saveDashboard({ name, html: currentHtml, json_schema: schema })
+      const saved = await saveDashboard({
+        name,
+        html: currentHtml,
+        json_schema: schema,
+        asana_scope_type: lastAsanaScope?.type || null,
+        asana_scope_gid: lastAsanaScope?.gid || null,
+        asana_scope_name: lastAsanaScope?.name || null,
+      })
       setSavedId(saved.id)
-      // Clear the persisted JSON after saving — start fresh if user wants a new dashboard
+      // Clear persisted JSON and scope after saving
       setLastJsonData(null)
       setLastJsonSchema(null)
+      setLastAsanaScope(null)
       toast.success(`Dashboard "${name}" saved!`)
     } catch {
       toast.error('Failed to save dashboard')
@@ -98,8 +112,12 @@ export default function Home() {
           onSend={handleSend}
           loading={loading}
           hasHtml={!!currentHtml}
-          activeJsonName={lastJsonData ? '(using uploaded JSON)' : null}
-          onClearJson={() => { setLastJsonData(null); setLastJsonSchema(null) }}
+          activeJsonName={
+            lastJsonData
+              ? (lastAsanaScope ? `asana: ${lastAsanaScope.name}` : '(using uploaded JSON)')
+              : null
+          }
+          onClearJson={() => { setLastJsonData(null); setLastJsonSchema(null); setLastAsanaScope(null) }}
         />
       </div>
 

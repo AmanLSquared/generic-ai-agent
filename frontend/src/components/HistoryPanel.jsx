@@ -173,13 +173,15 @@ function InjectModal({ dashboard, onClose, onSuccess }) {
     e.target.value = ''
   }
 
-  const handleAsanaRefetch = async () => {
+  const handleAsanaRefetch = async (scopeType = null, scopeGid = null) => {
     try {
       toast.loading('Fetching from Asana…', { id: 'ainject' })
-      const data = await fetchAsanaData()
+      const data = await fetchAsanaData(
+        scopeType && scopeGid ? { scope_type: scopeType, scope_gid: scopeGid } : {}
+      )
       toast.success('Fetched!', { id: 'ainject' })
       setNewData(data)
-      setFileName('asana-data.json')
+      setFileName(scopeType ? `asana: ${dashboard.asana_scope_name || scopeGid}` : 'asana-data.json')
       analyzeKeys(data)
       setStep(2)
     } catch (err) {
@@ -254,11 +256,26 @@ function InjectModal({ dashboard, onClose, onSuccess }) {
                 <span className="text-sm">Click to upload JSON</span>
                 <input type="file" accept=".json" className="hidden" onChange={handleFile} />
               </label>
-              {dashboard.asana_workspace_id && (
-                <button onClick={handleAsanaRefetch} className="btn-secondary text-sm">
-                  Re-fetch from Asana
+              {/* Scoped Asana refresh — shown when dashboard was saved with a scope */}
+              {dashboard.asana_scope_type && (
+                <button
+                  onClick={() => handleAsanaRefetch(dashboard.asana_scope_type, dashboard.asana_scope_gid)}
+                  className="flex items-center justify-center gap-2 w-full py-3 rounded-lg bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 text-amber-400 text-sm font-medium transition-colors"
+                >
+                  <span className="font-bold">A</span>
+                  Refresh from Asana:
+                  <span className="font-semibold">{dashboard.asana_scope_name}</span>
+                  <span className="text-xs text-amber-600">({dashboard.asana_scope_type})</span>
                 </button>
               )}
+
+              {/* Generic Asana fetch — always available */}
+              <button
+                onClick={() => handleAsanaRefetch()}
+                className="btn-secondary text-sm w-full"
+              >
+                {dashboard.asana_scope_type ? 'Fetch All Asana Data Instead' : 'Re-fetch from Asana'}
+              </button>
             </div>
           )}
 

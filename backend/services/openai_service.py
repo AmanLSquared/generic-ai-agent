@@ -10,7 +10,7 @@ async def generate_dashboard_html(api_key: str, system_prompt: str, user_message
             {"role": "user", "content": user_message},
         ],
         temperature=0.2,
-        max_tokens=8192,
+        max_tokens=32768,
     )
     return response.choices[0].message.content.strip()
 
@@ -32,10 +32,10 @@ async def continue_dashboard_chat(
         *messages,
     ]
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4.1",
         messages=context_messages,
         temperature=0.2,
-        max_tokens=8192,
+        max_tokens=32768,
     )
     return response.choices[0].message.content.strip()
 

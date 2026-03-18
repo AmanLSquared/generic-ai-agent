@@ -26,7 +26,17 @@ export const injectData = (id, newData) =>
 // ── Asana ─────────────────────────────────────────────────────────────────────
 export const connectAsana = (pat) => api.post('/asana/connect', { pat }).then(r => r.data)
 
-export const fetchAsanaData = () => api.get('/asana/data').then(r => r.data)
+export const fetchAsanaData = (params = {}) => {
+  const qs = new URLSearchParams()
+  if (params.scope_type) qs.set('scope_type', params.scope_type)
+  if (params.scope_gid) qs.set('scope_gid', params.scope_gid)
+  const query = qs.toString()
+  return api.get(`/asana/data${query ? '?' + query : ''}`).then(r => r.data)
+}
+
+export const fetchAsanaMembers = () => api.get('/asana/members').then(r => r.data.members)
+
+export const fetchAsanaProjects = () => api.get('/asana/projects').then(r => r.data.projects)
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 export const getSettings = () => api.get('/settings').then(r => r.data)

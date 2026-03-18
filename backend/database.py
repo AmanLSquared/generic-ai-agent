@@ -20,3 +20,19 @@ async def get_db() -> AsyncSession:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def migrate_db():
+    """Safely add new columns to existing databases (SQLite ALTER TABLE is idempotent via try/except)."""
+    from sqlalchemy import text
+    new_columns = [
+        ("dashboards", "asana_scope_type", "TEXT"),
+        ("dashboards", "asana_scope_gid", "TEXT"),
+        ("dashboards", "asana_scope_name", "TEXT"),
+    ]
+    async with engine.begin() as conn:
+        for table, col, col_type in new_columns:
+            try:
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+            except Exception:
+                pass  # Column already exists
