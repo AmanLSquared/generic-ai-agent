@@ -373,24 +373,19 @@ def _render_jinja_preview(template_str: str, json_data: dict) -> str:
 @router.post("/generate")
 async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
     api_key = await get_openai_key(db)
-    user_message = req.prompt
     if req.json_data:
         scope_type = req.json_data.get("scope", {}).get("type", "project")
         is_user_scope = scope_type == "user"
         schema = _schema_only_user() if is_user_scope else _schema_only(req.json_data)
         system_prompt = USER_SYSTEM_PROMPT if is_user_scope else SYSTEM_PROMPT
-        print(f"=== SCHEMA SENT TO AI (scope={scope_type}, no actual values) ===")
-        print(json.dumps(schema, indent=2))
-        user_message += f"\n\nAsana {scope_type} data SCHEMA (use these field names for Jinja2 variables, do NOT use the placeholder strings as values):\n```json\n{json.dumps(schema, indent=2)}\n```"
-    else:
-        system_prompt = SYSTEM_PROMPT
-    template = await generate_dashboard_html(api_key, system_prompt, user_message)
-    # Render preview with actual data so frontend shows real values
-    if req.json_data:
+        user_message = req.prompt + f"\n\nAsana {scope_type} data SCHEMA (use these Jinja2 variable names ONLY — do NOT hardcode any real values):\n```json\n{json.dumps(schema, indent=2)}\n```"
+        template = await generate_dashboard_html(api_key, system_prompt, user_message)
         rendered_html = _render_jinja_preview(template, req.json_data)
-    else:
-        rendered_html = template
-    return {"html": rendered_html, "template": template}
+        return {"html": rendered_html, "template": template}
+
+    # Pure text prompt — no scope data
+    template = await generate_dashboard_html(api_key, SYSTEM_PROMPT, req.prompt)
+    return {"html": template, "template": template}
 
 
 @router.post("/generate/continue")
@@ -398,8 +393,10 @@ async def continue_generation(req: ContinueRequest, db: AsyncSession = Depends(g
     api_key = await get_openai_key(db)
     messages = [dict(m) for m in req.messages[-10:]]
     if req.json_data:
-        schema = _schema_only(req.json_data)
-        messages[-1]["content"] += f"\n\nUpdated data schema (use these Jinja2 variable names, do NOT hardcode values):\n```json\n{json.dumps(schema, indent=2)}\n```"
+        scope_type = req.json_data.get("scope", {}).get("type", "project")
+        is_user_scope = scope_type == "user"
+        schema = _schema_only_user() if is_user_scope else _schema_only(req.json_data)
+        messages[-1]["content"] += f"\n\nReminder — this is a Jinja2 template. Use ONLY these variable names, do NOT hardcode any real values:\n```json\n{json.dumps(schema, indent=2)}\n```"
     # current_html is the Jinja2 template (not rendered HTML)
     template = await continue_dashboard_chat(api_key, CONTINUATION_SYSTEM_PROMPT, messages, req.current_html)
     if req.json_data:

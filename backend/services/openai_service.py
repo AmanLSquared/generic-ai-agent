@@ -1,6 +1,20 @@
 from openai import AsyncOpenAI
 
 
+def _strip_fences(text: str) -> str:
+    """Remove markdown code fences the AI sometimes wraps around the HTML."""
+    text = text.strip()
+    if text.startswith("```"):
+        # drop first line (```html or ```) and last ```
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
 async def generate_dashboard_html(api_key: str, system_prompt: str, user_message: str) -> str:
     client = AsyncOpenAI(api_key=api_key)
     response = await client.chat.completions.create(
@@ -12,7 +26,7 @@ async def generate_dashboard_html(api_key: str, system_prompt: str, user_message
         temperature=0.2,
         max_tokens=32768,
     )
-    return response.choices[0].message.content.strip()
+    return _strip_fences(response.choices[0].message.content)
 
 
 async def continue_dashboard_chat(
@@ -37,7 +51,7 @@ async def continue_dashboard_chat(
         temperature=0.2,
         max_tokens=32768,
     )
-    return response.choices[0].message.content.strip()
+    return _strip_fences(response.choices[0].message.content)
 
 
 async def test_openai_key(api_key: str) -> bool:
