@@ -23,6 +23,13 @@ export const deleteDashboard = (id) => api.delete(`/dashboards/${id}`).then(r =>
 export const injectData = (id, newData) =>
   api.post(`/dashboards/${id}/inject`, { new_data: newData }).then(r => r.data)
 
+export const fetchRenderedDashboard = async (dashboardId, projectId) => {
+  const url = `/render/${dashboardId}?project_id=${projectId}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Render failed: ${res.status}`)
+  return res.text()
+}
+
 // ── Asana ─────────────────────────────────────────────────────────────────────
 export const connectAsana = (pat) => api.post('/asana/connect', { pat }).then(r => r.data)
 

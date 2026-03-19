@@ -104,6 +104,14 @@ function DashboardCard({ dashboard, onOpen, onDelete, onUpdateData }) {
           className="w-full border-0 pointer-events-none origin-top-left"
           style={{ transform: 'scale(0.35)', width: '285%', height: '285%' }}
         />
+        {/* Delete button overlaid on preview */}
+        <button
+          onClick={onDelete}
+          title="Delete dashboard"
+          className="absolute top-2 right-2 w-7 h-7 flex items-center justify-center rounded-lg bg-red-600 hover:bg-red-500 text-white shadow-lg transition-colors z-10"
+        >
+          <Trash2 size={13} />
+        </button>
       </div>
 
       <div className="p-3">
@@ -120,7 +128,6 @@ function DashboardCard({ dashboard, onOpen, onDelete, onUpdateData }) {
             label="Embed"
             onClick={handleCopyEmbed}
           />
-          <ActionBtn icon={<Trash2 size={12} />} label="Delete" onClick={onDelete} danger />
         </div>
       </div>
     </div>

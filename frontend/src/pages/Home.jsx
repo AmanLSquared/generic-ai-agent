@@ -27,6 +27,7 @@ function autoName(prompt) {
 export default function Home() {
   const [messages, setMessages] = useState([])
   const [currentHtml, setCurrentHtml] = useState('')
+  const [currentTemplate, setCurrentTemplate] = useState('')  // Jinja2 template (for save & continue)
   const [loading, setLoading] = useState(false)
   const [savedId, setSavedId] = useState(null)
   const [lastJsonData, setLastJsonData] = useState(null)
@@ -59,14 +60,16 @@ export default function Home() {
         // First generation: pass whatever JSON is active (new or persisted)
         const res = await generateDashboard(userContent, activeJson)
         html = res.html
+        setCurrentTemplate(res.template || '')
       } else {
         const chatMessages = newMessages.map(m => ({ role: m.role, content: m.content }))
-        // Continuation: only pass NEW json uploaded in this message.
-        // For pure refinements ("change theme", "add chart") pass null —
-        // DASHBOARD_DATA is already embedded inside current_html; re-sending
-        // the full JSON on every turn bloats the context and causes truncated responses.
-        const res = await continueDashboard(chatMessages, currentHtml, jsonData || null)
+        // Always pass lastJsonData (or new jsonData) so backend can attach correct schema to AI.
+        // Real values are stripped server-side by _schema_only(); AI only ever sees placeholders.
+        const schemaData = jsonData ?? lastJsonData
+        // Pass the Jinja2 template (not rendered html) so AI edits the template itself
+        const res = await continueDashboard(chatMessages, currentTemplate || currentHtml, schemaData || null)
         html = res.html
+        setCurrentTemplate(res.template || currentTemplate)
       }
       setCurrentHtml(html)
       setMessages(prev => [...prev, { role: 'assistant', content: 'Dashboard updated! You can refine it or save it.' }])
@@ -83,10 +86,14 @@ export default function Home() {
     if (!currentHtml) return
     const name = autoName(messages[0]?.content || 'Dashboard')
     const schema = lastJsonSchema || {}
+    // Save the Jinja2 template as `html` (not the rendered preview) when a template exists.
+    // This ensures the DB never stores hardcoded values — only {{ key }} placeholders.
+    const htmlToSave = currentTemplate || currentHtml
     try {
       const saved = await saveDashboard({
         name,
-        html: currentHtml,
+        html: htmlToSave,
+        html_template: currentTemplate || null,
         json_schema: schema,
         asana_scope_type: lastAsanaScope?.type || null,
         asana_scope_gid: lastAsanaScope?.gid || null,
