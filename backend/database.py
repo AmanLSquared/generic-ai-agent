@@ -29,6 +29,7 @@ async def migrate_db():
         ("dashboards", "asana_scope_type", "TEXT"),
         ("dashboards", "asana_scope_gid", "TEXT"),
         ("dashboards", "asana_scope_name", "TEXT"),
+        ("dashboards", "html_template", "TEXT"),
     ]
     async with engine.begin() as conn:
         for table, col, col_type in new_columns:

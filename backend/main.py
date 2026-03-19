@@ -1,15 +1,116 @@
 from contextlib import asynccontextmanager
+import json
+import os
 from dotenv import load_dotenv
 load_dotenv()  # Load .env before anything else reads os.getenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from jinja2 import Environment, ChainableUndefined
 from sqlalchemy import select
 
 from database import init_db, migrate_db, AsyncSessionLocal
-from models import Dashboard
+from models import Dashboard, Setting
 from routes import dashboards, generate, asana, settings as settings_router
+
+
+import re as _re
+from datetime import datetime as _datetime
+
+_ISO_DATE_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _parse_date_str(s: str, fmt: str = "%Y-%m-%d") -> str:
+    """Parse an ISO date/datetime string and format it. Returns the original string on failure."""
+    for parser_fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                       "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return _datetime.strptime(s[:26], parser_fmt).strftime(fmt)
+        except ValueError:
+            continue
+    return s
+
+
+class SmartDateStr(str):
+    """String subclass that also exposes .strftime() so templates can call
+    {{ task.due_date.strftime('%b %d') }} even when the value is an ISO string."""
+    def strftime(self, fmt="%Y-%m-%d"):
+        return _parse_date_str(str(self), fmt)
+
+
+class _DateAwareEnvironment(Environment):
+    """Jinja2 Environment that intercepts .strftime attribute access on plain strings.
+    This means {{ some_date_string.strftime('%b %d') }} always works, even if the
+    string was not wrapped in SmartDateStr by _make_safe."""
+    def getattr(self, obj, attribute):
+        if attribute == "strftime" and isinstance(obj, str):
+            return SmartDateStr(obj).strftime
+        return super().getattr(obj, attribute)
+
+
+class SafeDict(dict):
+    """Dict that returns empty string for missing keys — prevents Jinja2 UndefinedError."""
+    def __missing__(self, key):
+        return ''
+    def __getattr__(self, key):
+        return self.get(key, '')
+
+
+def _make_safe(obj):
+    """Recursively wrap dicts in SafeDict; wrap ISO date strings in SmartDateStr."""
+    if isinstance(obj, dict):
+        return SafeDict({k: _make_safe(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_make_safe(i) for i in obj]
+    if isinstance(obj, str) and _ISO_DATE_RE.match(obj):
+        return SmartDateStr(obj)
+    return obj
+
+
+def _jinja_render(template_str: str, asana_data: dict) -> str:
+    from datetime import date, datetime
+
+    today_str = date.today().isoformat()
+
+    class _CallableStr(str):
+        """A string that is also callable — handles both {{ now }} and {{ now() }}."""
+        def __call__(self, *args, **kwargs):
+            return today_str
+
+    def _strftime_filter(value, fmt="%Y-%m-%d"):
+        """Jinja2 filter: format a date string or date/datetime object. Returns '' on failure."""
+        if not value:
+            return ''
+        if isinstance(value, (date, datetime)):
+            return value.strftime(fmt)
+        # Try parsing ISO date strings like "2026-03-19" or "2026-03-19T..."
+        for parser_fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                           "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(str(value)[:26], parser_fmt).strftime(fmt)
+            except ValueError:
+                continue
+        return str(value)
+
+    env = _DateAwareEnvironment(autoescape=False, undefined=ChainableUndefined)
+    env.filters["strftime"] = _strftime_filter
+    tmpl = env.from_string(template_str)
+    safe = _make_safe(asana_data)
+    return tmpl.render(
+        project=safe.get("project", SafeDict()),
+        user=safe.get("user", SafeDict()),
+        tasks=safe.get("tasks", []),
+        subtasks=safe.get("subtasks", []),
+        all_tasks=safe.get("all_tasks", safe.get("tasks", [])),
+        summary=safe.get("summary", SafeDict()),
+        workspace=safe.get("workspace", SafeDict()),
+        scope=safe.get("scope", SafeDict()),
+        projects_contributed=safe.get("projects_contributed", []),
+        projects_breakdown=safe.get("projects_breakdown", []),
+        now=_CallableStr(today_str),
+        today=_CallableStr(today_str),
+    )
 
 
 @asynccontextmanager
@@ -37,9 +138,77 @@ app.include_router(settings_router.router, prefix="/api")
 
 @app.get("/dashboard/{dashboard_id}/view", response_class=HTMLResponse)
 async def view_dashboard(dashboard_id: str):
+    from services.asana_service import fetch_asana_data, decrypt_value
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))
         dashboard = result.scalar_one_or_none()
         if not dashboard:
             return HTMLResponse("<h1>Dashboard not found</h1>", status_code=404)
+
+        # If template + stored scope exists, render dynamically
+        if dashboard.html_template and dashboard.asana_scope_type and dashboard.asana_scope_gid:
+            pat = os.getenv("ASANA_PAT", "").strip()
+            if not pat:
+                pat_result = await db.execute(select(Setting).where(Setting.key == "asana_pat"))
+                setting = pat_result.scalar_one_or_none()
+                if setting and setting.value:
+                    pat = decrypt_value(setting.value)
+            if pat:
+                try:
+                    asana_data = await fetch_asana_data(
+                        pat,
+                        scope_type=dashboard.asana_scope_type,
+                        scope_gid=dashboard.asana_scope_gid,
+                    )
+                    rendered = _jinja_render(dashboard.html_template, asana_data)
+                    return HTMLResponse(content=rendered)
+                except Exception as e:
+                    print(f"Dynamic render failed, falling back to static: {e}")
+
         return HTMLResponse(content=dashboard.html)
+
+
+@app.get("/render/{dashboard_id}", response_class=HTMLResponse)
+async def render_dashboard(
+    dashboard_id: str,
+    project_id: str | None = Query(default=None, description="Asana project GID"),
+    user_id: str | None = Query(default=None, description="Asana user GID (or 'me')"),
+):
+    """
+    Dynamic render endpoint — pass project_id OR user_id.
+    Fetches real-time Asana data and injects into the saved Jinja2 template.
+    Each request hits Asana's API fresh (no caching).
+    """
+    if not project_id and not user_id:
+        return HTMLResponse("<h1>Pass ?project_id=GID or ?user_id=GID</h1>", status_code=400)
+
+    from services.asana_service import fetch_asana_data, decrypt_value
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Dashboard).where(Dashboard.id == dashboard_id))
+        dashboard = result.scalar_one_or_none()
+        if not dashboard:
+            return HTMLResponse("<h1>Dashboard not found</h1>", status_code=404)
+        if not dashboard.html_template:
+            return HTMLResponse(
+                "<h1>No Jinja2 template found. Re-save the dashboard to generate a template.</h1>",
+                status_code=400,
+            )
+
+        pat = os.getenv("ASANA_PAT", "").strip()
+        if not pat:
+            pat_result = await db.execute(select(Setting).where(Setting.key == "asana_pat"))
+            setting = pat_result.scalar_one_or_none()
+            if not setting or not setting.value:
+                return HTMLResponse("<h1>Asana not connected</h1>", status_code=400)
+            pat = decrypt_value(setting.value)
+
+        html_template = dashboard.html_template
+
+    if project_id:
+        asana_data = await fetch_asana_data(pat, scope_type="project", scope_gid=project_id)
+    else:
+        asana_data = await fetch_asana_data(pat, scope_type="user", scope_gid=user_id)
+
+    rendered = _jinja_render(html_template, asana_data)
+    return HTMLResponse(content=rendered)

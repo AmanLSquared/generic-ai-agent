@@ -17,6 +17,7 @@ class Dashboard(Base):
     asana_scope_type: Mapped[str | None] = mapped_column(Text, nullable=True)  # "project" | "user" | None
     asana_scope_gid: Mapped[str | None] = mapped_column(Text, nullable=True)
     asana_scope_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    html_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

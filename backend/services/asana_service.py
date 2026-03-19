@@ -29,10 +29,18 @@ def decrypt_value(encrypted: str) -> str:
 
 ASANA_BASE = "https://app.asana.com/api/1.0"
 
+# SSL verification can be disabled via env var for dev environments with broken cert chains
+_SSL_VERIFY = os.getenv("HTTPX_SSL_VERIFY", "true").lower() != "false"
+
+
+def _client(**kwargs) -> httpx.AsyncClient:
+    """Return a configured AsyncClient. Set HTTPX_SSL_VERIFY=false in .env to skip SSL verification."""
+    return httpx.AsyncClient(verify=_SSL_VERIFY, **kwargs)
+
 
 async def test_asana_token(pat: str) -> dict | None:
     try:
-        async with httpx.AsyncClient() as client:
+        async with _client() as client:
             resp = await client.get(
                 f"{ASANA_BASE}/users/me",
                 headers={"Authorization": f"Bearer {pat}"},
@@ -107,7 +115,9 @@ async def _fetch_user_scope(
     scope_gid: str,
     today: str,
 ) -> dict:
-    """Fetch all tasks assigned to a specific user (or 'me')."""
+    """Fetch all tasks assigned to a specific user (or 'me'), including subtasks."""
+    import asyncio
+
     if scope_gid == "me":
         me_resp = await client.get(f"{ASANA_BASE}/users/me", headers=headers)
         me_resp.raise_for_status()
@@ -131,12 +141,12 @@ async def _fetch_user_scope(
         {
             "assignee": scope_gid,
             "workspace": workspace["id"],
-            "opt_fields": "name,due_on,completed,tags.name,memberships.project.name",
+            "opt_fields": "name,due_on,completed,tags.name,memberships.project.name,num_subtasks",
             "completed_since": "2000-01-01T00:00:00.000Z",
         },
     )
 
-    tasks = []
+    parent_tasks = []
     projects_set: set[str] = set()
     for t in tasks_raw:
         memberships = t.get("memberships") or []
@@ -148,24 +158,113 @@ async def _fetch_user_scope(
         if proj_name:
             projects_set.add(proj_name)
         tags = [tag.get("name", "") for tag in (t.get("tags") or [])]
-        tasks.append({
+        parent_tasks.append({
             "id": t.get("gid", ""),
             "name": t.get("name", ""),
             "project": proj_name,
             "due_date": t.get("due_on") or "",
             "completed": t.get("completed", False),
             "tags": tags,
+            "is_subtask": False,
+            "parent_id": "",
+            "parent_name": "",
+            "num_subtasks": t.get("num_subtasks", 0) or 0,
         })
 
-    summary = _build_task_summary(tasks, today)
+    # Fetch subtasks in parallel for tasks that have them
+    tasks_with_subtasks = [t for t in parent_tasks if t["num_subtasks"] > 0]
+    subtask_results = await asyncio.gather(
+        *[_fetch_subtasks(client, headers, t, today) for t in tasks_with_subtasks],
+        return_exceptions=True,
+    )
+
+    all_subtasks = []
+    for result in subtask_results:
+        if isinstance(result, list):
+            all_subtasks.extend(result)
+
+    # Attach subtask list to each parent task
+    subtasks_by_parent = {}
+    for st in all_subtasks:
+        subtasks_by_parent.setdefault(st["parent_id"], []).append(st)
+    for t in parent_tasks:
+        t["subtasks"] = subtasks_by_parent.get(t["id"], [])
+
+    all_tasks_flat = parent_tasks + all_subtasks
+    summary = _build_task_summary(all_tasks_flat, today)
+
+    # Per-project task breakdown for charts
+    project_breakdown: dict[str, dict] = {}
+    for t in all_tasks_flat:
+        proj = t.get("project", "") or "Unassigned"
+        if proj not in project_breakdown:
+            project_breakdown[proj] = {"total": 0, "completed": 0, "overdue": 0}
+        project_breakdown[proj]["total"] += 1
+        if t.get("completed"):
+            project_breakdown[proj]["completed"] += 1
+        elif t.get("due_date") and t["due_date"] < today:
+            project_breakdown[proj]["overdue"] += 1
+
+    projects_breakdown_list = [
+        {"name": k, **v} for k, v in project_breakdown.items()
+    ]
+
+    print(
+        f"Fetched user scope for user_gid={scope_gid}: "
+        f"{len(parent_tasks)} tasks + {len(all_subtasks)} subtasks = {len(all_tasks_flat)} total, "
+        f"summary={summary}"
+    )
     return {
         "scope": {"type": "user", "gid": scope_gid, "name": user_name},
         "workspace": workspace,
         "user": {"gid": scope_gid, "name": user_name, "email": user_email},
         "projects_contributed": sorted(projects_set),
-        "tasks": tasks,
+        "projects_breakdown": projects_breakdown_list,
+        "tasks": parent_tasks,
+        "subtasks": all_subtasks,
+        "all_tasks": all_tasks_flat,
         "summary": summary,
     }
+
+
+async def _fetch_subtasks(
+    client: httpx.AsyncClient,
+    headers: dict,
+    parent_task: dict,
+    today: str,
+) -> list:
+    """Fetch all subtasks for a given parent task."""
+    try:
+        resp = await client.get(
+            f"{ASANA_BASE}/tasks/{parent_task['id']}/subtasks",
+            headers=headers,
+            params={
+                "opt_fields": "name,assignee.name,due_on,completed,tags.name,num_subtasks",
+                "limit": 100,
+            },
+        )
+        resp.raise_for_status()
+        subtasks_raw = resp.json().get("data", [])
+    except Exception as e:
+        print(f"Warning: could not fetch subtasks for {parent_task['id']}: {e}")
+        return []
+
+    subtasks = []
+    for s in subtasks_raw:
+        assignee = s.get("assignee") or {}
+        tags = [tag.get("name", "") for tag in (s.get("tags") or [])]
+        subtasks.append({
+            "id": s.get("gid", ""),
+            "name": s.get("name", ""),
+            "assignee": assignee.get("name", "") if isinstance(assignee, dict) else "",
+            "due_date": s.get("due_on") or "",
+            "completed": s.get("completed", False),
+            "tags": tags,
+            "is_subtask": True,
+            "parent_id": parent_task["id"],
+            "parent_name": parent_task["name"],
+        })
+    return subtasks
 
 
 async def _fetch_project_scope(
@@ -175,7 +274,9 @@ async def _fetch_project_scope(
     project_gid: str,
     today: str,
 ) -> dict:
-    """Fetch a single project and all its tasks."""
+    """Fetch a single project, all its tasks, and all subtasks."""
+    import asyncio
+
     proj_resp = await client.get(
         f"{ASANA_BASE}/projects/{project_gid}",
         headers=headers,
@@ -192,27 +293,53 @@ async def _fetch_project_scope(
         client, headers,
         {
             "project": project_gid,
-            "opt_fields": "name,assignee.name,due_on,completed,tags.name",
+            "opt_fields": "name,assignee.name,due_on,completed,tags.name,num_subtasks",
             "completed_since": "2000-01-01T00:00:00.000Z",
         },
     )
 
-    tasks = []
+    # Build parent task list
+    parent_tasks = []
     for t in tasks_raw:
         assignee = t.get("assignee") or {}
         tags = [tag.get("name", "") for tag in (t.get("tags") or [])]
-        tasks.append({
+        parent_tasks.append({
             "id": t.get("gid", ""),
             "name": t.get("name", ""),
             "assignee": assignee.get("name", "") if isinstance(assignee, dict) else "",
             "due_date": t.get("due_on") or "",
             "completed": t.get("completed", False),
             "tags": tags,
+            "is_subtask": False,
+            "parent_id": "",
+            "parent_name": "",
+            "num_subtasks": t.get("num_subtasks", 0) or 0,
         })
 
-        
+    # Fetch subtasks in parallel for tasks that have them
+    tasks_with_subtasks = [t for t in parent_tasks if t["num_subtasks"] > 0]
+    subtask_results = await asyncio.gather(
+        *[_fetch_subtasks(client, headers, t, today) for t in tasks_with_subtasks],
+        return_exceptions=True,
+    )
 
-    summary = _build_task_summary(tasks, today)
+    all_subtasks = []
+    for result in subtask_results:
+        if isinstance(result, list):
+            all_subtasks.extend(result)
+
+    # Attach subtask list to each parent task for template use
+    subtasks_by_parent = {}
+    for st in all_subtasks:
+        subtasks_by_parent.setdefault(st["parent_id"], []).append(st)
+
+    for t in parent_tasks:
+        t["subtasks"] = subtasks_by_parent.get(t["id"], [])
+
+    # All tasks flat (parents + subtasks) for accurate summary
+    all_tasks_flat = parent_tasks + all_subtasks
+
+    summary = _build_task_summary(all_tasks_flat, today)
     project_info = {
         "id": proj.get("gid", ""),
         "name": proj.get("name", ""),
@@ -221,17 +348,23 @@ async def _fetch_project_scope(
         "team_members": members,
         **summary,
     }
-# log the fetched project scope and summary for debugging
-    print(f"Fetched project scope for project_gid={project_gid}: {len(tasks)} tasks, summary={summary}")
+
+    print(
+        f"Fetched project scope for project_gid={project_gid}: "
+        f"{len(parent_tasks)} tasks + {len(all_subtasks)} subtasks = {len(all_tasks_flat)} total, "
+        f"summary={summary}"
+    )
     return {
         "scope": {"type": "project", "gid": project_gid, "name": proj.get("name", "")},
         "workspace": workspace,
         "project": project_info,
-        "tasks": tasks,
+        "tasks": parent_tasks,        # parent tasks (each has .subtasks list)
+        "subtasks": all_subtasks,     # flat subtask list
+        "all_tasks": all_tasks_flat,  # parents + subtasks combined (for charts/summary)
         "summary": summary,
     }
-    
-    
+
+
 
 async def _fetch_all_scope(
     client: httpx.AsyncClient,
@@ -335,7 +468,7 @@ async def _fetch_all_scope(
 async def fetch_workspace_members(pat: str) -> list:
     """Return all members of the first workspace."""
     headers = {"Authorization": f"Bearer {pat}"}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with _client(timeout=30) as client:
         workspace = await _get_workspace(client, headers)
         resp = await client.get(
             f"{ASANA_BASE}/workspaces/{workspace['id']}/users",
@@ -349,7 +482,7 @@ async def fetch_workspace_members(pat: str) -> list:
 async def fetch_projects_list(pat: str) -> list:
     """Return all projects (gid + name only) for the first workspace."""
     headers = {"Authorization": f"Bearer {pat}"}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with _client(timeout=30) as client:
         workspace = await _get_workspace(client, headers)
         resp = await client.get(
             f"{ASANA_BASE}/projects",
@@ -372,7 +505,7 @@ async def fetch_asana_data(
     scope_gid:  Asana GID of the project/user, or "me" for the current user
     """
     headers = {"Authorization": f"Bearer {pat}"}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with _client(timeout=30) as client:
         workspace = await _get_workspace(client, headers)
         today = date.today().isoformat()
 

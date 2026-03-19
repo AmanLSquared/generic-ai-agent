@@ -1,6 +1,7 @@
 import json
 import os
 from fastapi import APIRouter, HTTPException, Depends
+from jinja2 import Environment, ChainableUndefined
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,34 +12,150 @@ from services.openai_service import generate_dashboard_html, continue_dashboard_
 router = APIRouter()
 
 SYSTEM_PROMPT = """You are an expert frontend developer specializing in beautiful data dashboards.
-Generate a single self-contained HTML file for a dashboard based on the user's data and instructions.
-Rules:
+Generate a single self-contained Jinja2 HTML template for an Asana project dashboard.
 
-1. The file must work standalone in any browser — include all CSS in a <style> tag.
-2. Use Chart.js loaded from CDN (https://cdn.jsdelivr.net/npm/chart.js) for all charts.
-3. Store ALL data in a single const DASHBOARD_DATA = { ... } object at the very top of the <script> block.
-4. NEVER hardcode data values in chart configs or DOM — always reference DASHBOARD_DATA.fieldName.
-5. The DASHBOARD_DATA structure must exactly match the user's input JSON structure.
-6. Add this comment above DASHBOARD_DATA:
-   // DASHBOARD_DATA — update this object to refresh all charts and values
-   // Keys: [list the top-level keys here]
-7. Design must be modern: use a clean card-based layout, subtle shadows, smooth colors, responsive grid.
-8. Include KPI summary cards at the top if the data supports it.
-9. Use appropriate chart types: bar/line for trends, pie/donut for proportions, radar for comparisons.
-10. Return ONLY the complete HTML file content. No explanation, no markdown, no code fences."""
+The template will be rendered server-side using Jinja2. You will receive the data SCHEMA (structure only).
+You MUST use Jinja2 variables for every value — NEVER put any actual data value in the HTML.
+
+Available Jinja2 variables:
+
+  project.name           — project name (string)
+  project.status         — current status text (string)
+  project.due_date       — project due date (string, may be empty)
+  project.team_members   — list of member name strings
+  project.total_tasks    — total task count (int)
+  project.completed_tasks   — completed count (int)
+  project.incomplete_tasks  — incomplete count (int)
+  project.overdue_tasks  — overdue count (int)
+  project.completion_rate   — completion % (float)
+
+  tasks                  — list of parent task objects:
+    t.name, t.assignee, t.due_date, t.completed (bool), t.tags (list),
+    t.is_subtask (False), t.num_subtasks (int), t.subtasks (list of subtask objects)
+
+  subtasks               — flat list of all subtask objects:
+    st.name, st.assignee, st.due_date, st.completed (bool), st.tags (list),
+    st.is_subtask (True), st.parent_id, st.parent_name
+
+  all_tasks              — parents + subtasks combined (use for charts/summary accuracy)
+
+  summary.total_tasks, summary.completed_tasks, summary.incomplete_tasks,
+  summary.overdue_tasks, summary.completion_rate
+  (summary counts include subtasks)
+
+  workspace.name         — workspace name (string)
+
+RULES — read carefully, violating any rule is wrong:
+1. EVERY dynamic value MUST use {{ }} syntax. ZERO hardcoded data values allowed.
+2. String values → {{ project.name }}, numbers → {{ summary.total_tasks }}, etc.
+3. Lists → {% for t in tasks %} ... {% endfor %}
+4. Conditions → {% if t.completed %}Completed{% else %}Incomplete{% endif %}
+5. Chart.js data arrays MUST use Jinja2 inline:
+     data: [{{ summary.completed_tasks }}, {{ summary.incomplete_tasks }}]
+     labels: [{% for t in tasks %}"{{ t.name }}"{% if not loop.last %},{% endif %}{% endfor %}]
+6. Member workload bar chart labels and data:
+     labels: [{% for m in project.team_members %}"{{ m }}"{% if not loop.last %},{% endif %}{% endfor %}]
+7. Include all CSS in a <style> tag — the file must be self-contained.
+8. Load Chart.js from CDN: https://cdn.jsdelivr.net/npm/chart.js
+9. Design: modern card-based layout, subtle shadows, smooth colors, responsive grid.
+10. KPI cards for: total tasks, completed, overdue, completion rate — all using Jinja2 variables.
+11. Return ONLY the complete HTML template. No explanation, no markdown, no code fences.
+
+EXAMPLE of correct vs wrong:
+
+  WRONG:  <div class="kpi-value">13</div>
+  RIGHT:  <div class="kpi-value">{{ summary.total_tasks }}</div>
+
+  WRONG:  <h1>Intel - Projects</h1>
+  RIGHT:  <h1>{{ project.name }}</h1>
+
+  WRONG:  data: [10, 3]
+  RIGHT:  data: [{{ summary.completed_tasks }}, {{ summary.incomplete_tasks }}]
+
+  WRONG:  <td>Traffic Widget</td>
+  RIGHT:  <td>{{ t.name }}</td>
+
+  WRONG:  <span>Jasindan Rasalingam</span>
+  RIGHT:  {% for m in project.team_members %}<span>{{ m }}</span>{% endfor %}"""
+
+USER_SYSTEM_PROMPT = """You are an expert frontend developer specializing in beautiful data dashboards.
+Generate a single self-contained Jinja2 HTML template for an Asana member/user dashboard.
+
+The template will be rendered server-side using Jinja2. You will receive the data SCHEMA (structure only).
+You MUST use Jinja2 variables for every value — NEVER put any actual data value in the HTML.
+
+Available Jinja2 variables:
+
+  user.name              — member name (string)
+  user.email             — member email (string)
+  user.gid               — member GID (string)
+
+  workspace.name         — workspace name (string)
+
+  projects_contributed   — list of project name strings this user has tasks in
+
+  projects_breakdown     — list of per-project stats:
+    p.name, p.total (int), p.completed (int), p.overdue (int)
+
+  tasks                  — list of parent task objects assigned to this user:
+    t.name, t.project (project name), t.due_date, t.completed (bool), t.tags (list),
+    t.is_subtask (False), t.num_subtasks (int), t.subtasks (list of subtask objects)
+
+  subtasks               — flat list of all subtask objects:
+    st.name, st.project, st.due_date, st.completed (bool), st.tags (list),
+    st.is_subtask (True), st.parent_id, st.parent_name
+
+  all_tasks              — parents + subtasks combined (use for charts/summary accuracy)
+
+  summary.total_tasks, summary.completed_tasks, summary.incomplete_tasks,
+  summary.overdue_tasks, summary.completion_rate
+  (summary counts include subtasks)
+
+RULES — read carefully, violating any rule is wrong:
+1. EVERY dynamic value MUST use {{ }} syntax. ZERO hardcoded data values allowed.
+2. String values → {{ user.name }}, numbers → {{ summary.total_tasks }}, etc.
+3. Lists → {% for t in tasks %} ... {% endfor %}
+4. Conditions → {% if t.completed %}Completed{% else %}Incomplete{% endif %}
+5. Chart.js data arrays MUST use Jinja2 inline:
+     data: [{{ summary.completed_tasks }}, {{ summary.incomplete_tasks }}]
+     labels: [{% for p in projects_breakdown %}"{{ p.name }}"{% if not loop.last %},{% endif %}{% endfor %}]
+6. Per-project bar chart:
+     labels: [{% for p in projects_breakdown %}"{{ p.name }}"{% if not loop.last %},{% endif %}{% endfor %}]
+     data:   [{% for p in projects_breakdown %}{{ p.total }}{% if not loop.last %},{% endif %}{% endfor %}]
+7. Include all CSS in a <style> tag — the file must be self-contained.
+8. Load Chart.js from CDN: https://cdn.jsdelivr.net/npm/chart.js
+9. Design: modern card-based layout, subtle shadows, smooth colors, responsive grid.
+10. KPI cards: total tasks, completed, overdue, completion rate — all using Jinja2 variables.
+11. Show task table with columns: Task, Project, Due Date, Status, Tags.
+12. Return ONLY the complete HTML template. No explanation, no markdown, no code fences.
+
+EXAMPLE of correct vs wrong:
+
+  WRONG:  <h1>Jasindan Rasalingam</h1>
+  RIGHT:  <h1>{{ user.name }}</h1>
+
+  WRONG:  <div class="kpi-value">42</div>
+  RIGHT:  <div class="kpi-value">{{ summary.total_tasks }}</div>
+
+  WRONG:  data: [10, 3]
+  RIGHT:  data: [{{ summary.completed_tasks }}, {{ summary.incomplete_tasks }}]
+
+  WRONG:  <td>Traffic Widget</td>
+  RIGHT:  <td>{{ t.name }}</td>"""
+
 
 CONTINUATION_SYSTEM_PROMPT = """You are an expert frontend developer specializing in beautiful data dashboards.
-You are refining an existing dashboard based on the user's follow-up instructions.
-Rules:
+You are refining an existing Jinja2 HTML template dashboard based on the user's follow-up instructions.
 
-1. Return the COMPLETE updated HTML file — every line, from <!DOCTYPE html> to </html>.
-2. CRITICAL: The existing dashboard contains a `const DASHBOARD_DATA = { ... }` block.
-   - PRESERVE IT EXACTLY as-is unless the user explicitly asks to change the data.
-   - Do NOT remove, empty, or replace DASHBOARD_DATA with empty arrays or placeholder values.
-   - The data is the source of truth for all charts and KPI cards — never lose it.
-3. Only change what the user asks for (theme, layout, colors, chart type, new chart, etc.).
-4. Keep all Chart.js CDN references and the self-contained structure intact.
-5. Return ONLY the complete HTML file content. No explanation, no markdown, no code fences."""
+Rules:
+1. Return the COMPLETE updated Jinja2 HTML template — every line, from <!DOCTYPE html> to </html>.
+2. CRITICAL: This is a Jinja2 template. It contains {{ variable }} expressions and {% %} blocks.
+   - PRESERVE all Jinja2 expressions exactly — do NOT replace them with hardcoded values.
+   - Do NOT remove any {{ }} or {% %} blocks unless the user explicitly asks.
+3. Only change what the user asks for (theme, layout, colors, chart type, new section, etc.).
+4. Keep all Chart.js CDN references and the self-contained CSS structure intact.
+5. If user asks to add a new data field, use the appropriate Jinja2 variable from the schema.
+6. Return ONLY the complete HTML template. No explanation, no markdown, no code fences."""
 
 
 class GenerateRequest(BaseModel):
@@ -53,7 +170,6 @@ class ContinueRequest(BaseModel):
 
 
 async def get_openai_key(db: AsyncSession) -> str:
-    # Env var takes priority over database setting
     env_key = os.getenv("OPENAI_API_KEY", "").strip()
     if env_key:
         return env_key
@@ -65,12 +181,133 @@ async def get_openai_key(db: AsyncSession) -> str:
     return setting.value
 
 
-def _trim_for_ai(data: dict, max_tasks: int = 75) -> dict:
+def _schema_only(data: dict) -> dict:
     """
-    Limit task arrays to max_tasks before sending to the AI.
-    Summaries are computed server-side from ALL tasks, so KPI numbers stay accurate.
-    This prevents the prompt from becoming enormous for large Asana workspaces.
+    Strip all actual values from Asana data — return only the schema skeleton.
+    This prevents the AI from hardcoding any real values into the Jinja2 template.
+    Preview rendering uses the original full data separately.
     """
+    return {
+        "scope": {"type": "project", "gid": "<gid>", "name": "<project_name>"},
+        "workspace": {"id": "<workspace_id>", "name": "<workspace_name>"},
+        "project": {
+            "id": "<id>",
+            "name": "<project_name>",
+            "status": "<status_text>",
+            "due_date": "<YYYY-MM-DD or empty>",
+            "team_members": ["<member_name_1>", "<member_name_2>"],
+            "total_tasks": "<int>",
+            "completed_tasks": "<int>",
+            "incomplete_tasks": "<int>",
+            "overdue_tasks": "<int>",
+            "completion_rate": "<float>",
+        },
+        "tasks": [
+            {
+                "id": "<id>",
+                "name": "<task_name>",
+                "assignee": "<assignee_name or empty>",
+                "due_date": "<YYYY-MM-DD or empty>",
+                "completed": "<true or false>",
+                "tags": ["<tag_name>"],
+                "is_subtask": False,
+                "num_subtasks": "<int>",
+                "subtasks": [
+                    {
+                        "id": "<id>",
+                        "name": "<subtask_name>",
+                        "assignee": "<assignee_name or empty>",
+                        "due_date": "<YYYY-MM-DD or empty>",
+                        "completed": "<true or false>",
+                        "tags": ["<tag_name>"],
+                        "is_subtask": True,
+                        "parent_name": "<parent_task_name>",
+                    }
+                ],
+            }
+        ],
+        "subtasks": [
+            {
+                "id": "<id>",
+                "name": "<subtask_name>",
+                "assignee": "<assignee_name or empty>",
+                "due_date": "<YYYY-MM-DD or empty>",
+                "completed": "<true or false>",
+                "tags": ["<tag_name>"],
+                "is_subtask": True,
+                "parent_id": "<parent_task_id>",
+                "parent_name": "<parent_task_name>",
+            }
+        ],
+        "all_tasks": "<flat list of all tasks + subtasks combined — use for summary charts>",
+        "summary": {
+            "total_tasks": "<int — includes subtasks>",
+            "completed_tasks": "<int>",
+            "incomplete_tasks": "<int>",
+            "overdue_tasks": "<int>",
+            "completion_rate": "<float>",
+        },
+    }
+
+
+def _schema_only_user() -> dict:
+    """Schema skeleton for user/member scope."""
+    return {
+        "scope": {"type": "user", "gid": "<gid>", "name": "<user_name>"},
+        "workspace": {"id": "<workspace_id>", "name": "<workspace_name>"},
+        "user": {"gid": "<gid>", "name": "<user_name>", "email": "<email>"},
+        "projects_contributed": ["<project_name_1>", "<project_name_2>"],
+        "projects_breakdown": [
+            {"name": "<project_name>", "total": "<int>", "completed": "<int>", "overdue": "<int>"}
+        ],
+        "tasks": [
+            {
+                "id": "<id>",
+                "name": "<task_name>",
+                "project": "<project_name>",
+                "due_date": "<YYYY-MM-DD or empty>",
+                "completed": "<true or false>",
+                "tags": ["<tag_name>"],
+                "is_subtask": False,
+                "num_subtasks": "<int>",
+                "subtasks": [
+                    {
+                        "id": "<id>",
+                        "name": "<subtask_name>",
+                        "project": "<project_name>",
+                        "due_date": "<YYYY-MM-DD or empty>",
+                        "completed": "<true or false>",
+                        "tags": ["<tag_name>"],
+                        "is_subtask": True,
+                        "parent_name": "<parent_task_name>",
+                    }
+                ],
+            }
+        ],
+        "subtasks": [
+            {
+                "id": "<id>",
+                "name": "<subtask_name>",
+                "project": "<project_name>",
+                "due_date": "<YYYY-MM-DD or empty>",
+                "completed": "<true or false>",
+                "tags": ["<tag_name>"],
+                "is_subtask": True,
+                "parent_id": "<parent_task_id>",
+                "parent_name": "<parent_task_name>",
+            }
+        ],
+        "all_tasks": "<flat list of all tasks + subtasks combined>",
+        "summary": {
+            "total_tasks": "<int — includes subtasks>",
+            "completed_tasks": "<int>",
+            "incomplete_tasks": "<int>",
+            "overdue_tasks": "<int>",
+            "completion_rate": "<float>",
+        },
+    }
+
+
     import copy
     trimmed = copy.deepcopy(data)
     tasks = trimmed.get("tasks", [])
@@ -84,30 +321,90 @@ def _trim_for_ai(data: dict, max_tasks: int = 75) -> dict:
     return trimmed
 
 
+def _render_jinja_preview(template_str: str, json_data: dict) -> str:
+    """Render Jinja2 template with actual JSON data for frontend preview.
+    Uses SafeDict so missing/hallucinated variables return '' instead of crashing."""
+    from datetime import date, datetime
+    from main import _make_safe, SafeDict, _DateAwareEnvironment
+
+    today_str = date.today().isoformat()
+
+    class _CallableStr(str):
+        def __call__(self, *args, **kwargs):
+            return today_str
+
+    def _strftime_filter(value, fmt="%Y-%m-%d"):
+        if not value:
+            return ''
+        if isinstance(value, (date, datetime)):
+            return value.strftime(fmt)
+        for parser_fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                           "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(str(value)[:26], parser_fmt).strftime(fmt)
+            except ValueError:
+                continue
+        return str(value)
+
+    env = _DateAwareEnvironment(autoescape=False, undefined=ChainableUndefined)
+    env.filters["strftime"] = _strftime_filter
+    try:
+        tmpl = env.from_string(template_str)
+        safe = _make_safe(json_data)
+        return tmpl.render(
+            project=safe.get("project", SafeDict()),
+            user=safe.get("user", SafeDict()),
+            tasks=safe.get("tasks", []),
+            subtasks=safe.get("subtasks", []),
+            all_tasks=safe.get("all_tasks", safe.get("tasks", [])),
+            summary=safe.get("summary", SafeDict()),
+            workspace=safe.get("workspace", SafeDict()),
+            scope=safe.get("scope", SafeDict()),
+            projects_contributed=safe.get("projects_contributed", []),
+            projects_breakdown=safe.get("projects_breakdown", []),
+            now=_CallableStr(today_str),
+            today=_CallableStr(today_str),
+        )
+    except Exception as e:
+        print(f"Jinja2 preview render error: {e}")
+        return template_str  # fallback: return template as-is
+
+
 @router.post("/generate")
 async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
     api_key = await get_openai_key(db)
     user_message = req.prompt
     if req.json_data:
-        print("=== FULL ASANA JSON RECEIVED FROM ASANA ===")
-        print(json.dumps(req.json_data, indent=2))
-        data_for_ai = _trim_for_ai(req.json_data)
-        print("=== TRIMMED JSON SENT TO AI ===")
-        print(json.dumps(data_for_ai, indent=2))
-        user_message += f"\n\nData:\n```json\n{json.dumps(data_for_ai, indent=2)}\n```"
-    html = await generate_dashboard_html(api_key, SYSTEM_PROMPT, user_message)
-    return {"html": html}
+        scope_type = req.json_data.get("scope", {}).get("type", "project")
+        is_user_scope = scope_type == "user"
+        schema = _schema_only_user() if is_user_scope else _schema_only(req.json_data)
+        system_prompt = USER_SYSTEM_PROMPT if is_user_scope else SYSTEM_PROMPT
+        print(f"=== SCHEMA SENT TO AI (scope={scope_type}, no actual values) ===")
+        print(json.dumps(schema, indent=2))
+        user_message += f"\n\nAsana {scope_type} data SCHEMA (use these field names for Jinja2 variables, do NOT use the placeholder strings as values):\n```json\n{json.dumps(schema, indent=2)}\n```"
+    else:
+        system_prompt = SYSTEM_PROMPT
+    template = await generate_dashboard_html(api_key, system_prompt, user_message)
+    # Render preview with actual data so frontend shows real values
+    if req.json_data:
+        rendered_html = _render_jinja_preview(template, req.json_data)
+    else:
+        rendered_html = template
+    return {"html": rendered_html, "template": template}
 
 
 @router.post("/generate/continue")
 async def continue_generation(req: ContinueRequest, db: AsyncSession = Depends(get_db)):
     api_key = await get_openai_key(db)
-    # Deep-copy message dicts to avoid mutating req objects
     messages = [dict(m) for m in req.messages[-10:]]
-    # Only embed new json_data if explicitly provided in this request (user uploaded new data).
-    # For style/layout refinements, DASHBOARD_DATA is already inside current_html — do not re-inject.
     if req.json_data:
-        data_for_ai = _trim_for_ai(req.json_data)
-        messages[-1]["content"] += f"\n\nNew data (replace DASHBOARD_DATA with this):\n```json\n{json.dumps(data_for_ai, indent=2)}\n```"
-    html = await continue_dashboard_chat(api_key, CONTINUATION_SYSTEM_PROMPT, messages, req.current_html)
-    return {"html": html}
+        schema = _schema_only(req.json_data)
+        messages[-1]["content"] += f"\n\nUpdated data schema (use these Jinja2 variable names, do NOT hardcode values):\n```json\n{json.dumps(schema, indent=2)}\n```"
+    # current_html is the Jinja2 template (not rendered HTML)
+    template = await continue_dashboard_chat(api_key, CONTINUATION_SYSTEM_PROMPT, messages, req.current_html)
+    if req.json_data:
+        rendered_html = _render_jinja_preview(template, req.json_data)
+    else:
+        # No new json_data — return template itself as preview
+        rendered_html = template
+    return {"html": rendered_html, "template": template}

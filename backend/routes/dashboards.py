@@ -8,7 +8,7 @@ from sqlalchemy import select, delete
 
 from database import get_db
 from models import Dashboard
-from services.injection_engine import inject_data
+from services.injection_engine import inject_data, convert_to_jinja_template
 
 router = APIRouter()
 
@@ -16,6 +16,7 @@ router = APIRouter()
 class DashboardCreate(BaseModel):
     name: str
     html: str
+    html_template: str | None = None
     json_schema: dict
     asana_workspace_id: str | None = None
     asana_scope_type: str | None = None   # "project" | "user"
@@ -33,18 +34,32 @@ class InjectRequest(BaseModel):
     new_data: dict
 
 
-def _make_embed_code(dashboard_id: str) -> str:
+def _make_embed_code(dashboard_id: str, scope_type: str | None = None, scope_gid: str | None = None) -> str:
+    if scope_gid:
+        if scope_type == "project":
+            return f'<iframe src="http://localhost:8000/render/{dashboard_id}?project_id={scope_gid}" width="100%" height="600" frameborder="0"></iframe>'
+        elif scope_type == "user":
+            return f'<iframe src="http://localhost:8000/render/{dashboard_id}?user_id={scope_gid}" width="100%" height="600" frameborder="0"></iframe>'
     return f'<iframe src="http://localhost:8000/dashboard/{dashboard_id}/view" width="100%" height="600" frameborder="0"></iframe>'
 
 
 @router.post("/dashboards")
 async def create_dashboard(req: DashboardCreate, db: AsyncSession = Depends(get_db)):
     dashboard_id = str(uuid.uuid4())
-    embed_code = _make_embed_code(dashboard_id)
+    # Use template from frontend if provided, else try to extract from html
+    if req.html_template:
+        html_template = req.html_template
+    else:
+        try:
+            html_template = convert_to_jinja_template(req.html)
+        except ValueError:
+            html_template = None
+    embed_code = _make_embed_code(dashboard_id, req.asana_scope_type, req.asana_scope_gid)
     dashboard = Dashboard(
         id=dashboard_id,
         name=req.name,
         html=req.html,
+        html_template=html_template,
         json_schema=json.dumps(req.json_schema),
         embed_code=embed_code,
         asana_workspace_id=req.asana_workspace_id,
@@ -84,6 +99,10 @@ async def update_dashboard(dashboard_id: str, req: DashboardUpdate, db: AsyncSes
         dashboard.name = req.name
     if req.html is not None:
         dashboard.html = req.html
+        try:
+            dashboard.html_template = convert_to_jinja_template(req.html)
+        except ValueError:
+            dashboard.html_template = None
     if req.json_schema is not None:
         dashboard.json_schema = json.dumps(req.json_schema)
     dashboard.updated_at = datetime.utcnow()
@@ -145,12 +164,15 @@ def _serialize(d: Dashboard) -> dict:
         "id": d.id,
         "name": d.name,
         "html": d.html,
+        "html_template": d.html_template,
         "json_schema": json.loads(d.json_schema),
         "embed_code": d.embed_code,
         "asana_workspace_id": d.asana_workspace_id,
         "asana_scope_type": d.asana_scope_type,
         "asana_scope_gid": d.asana_scope_gid,
         "asana_scope_name": d.asana_scope_name,
+        "has_template": d.html_template is not None,
+        "render_url": f"/render/{d.id}",
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "updated_at": d.updated_at.isoformat() if d.updated_at else None,
     }
