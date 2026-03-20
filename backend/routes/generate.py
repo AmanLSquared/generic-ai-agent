@@ -60,11 +60,9 @@ RULES — read carefully, violating any rule is wrong:
 9. Design: modern card-based layout, subtle shadows, smooth colors, responsive grid.
 10. KPI cards for: total tasks, completed, overdue, completion rate — all using Jinja2 variables.
 11. Return ONLY the complete HTML template. No explanation, no markdown, no code fences.
-
-EXAMPLE of correct vs wrong:
-
-  WRONG:  <div class="kpi-value">13</div>
-  RIGHT:  <div class="kpi-value">{{ summary.total_tasks }}</div>
+12. NEVER use Python slice notation inside Jinja2 blocks — `tasks[:10]` or `tasks[0:5]`
+    inside `{% %}` blocks is INVALID Jinja2 and will cause a TemplateSyntaxError.
+    To limit displayed items use: `{% if loop.index <= 10 %}...{% endif %}` inside the loop.
 
   WRONG:  <h1>Intel - Projects</h1>
   RIGHT:  <h1>{{ project.name }}</h1>
@@ -128,6 +126,9 @@ RULES — read carefully, violating any rule is wrong:
 10. KPI cards: total tasks, completed, overdue, completion rate — all using Jinja2 variables.
 11. Show task table with columns: Task, Project, Due Date, Status, Tags.
 12. Return ONLY the complete HTML template. No explanation, no markdown, no code fences.
+13. NEVER use Python slice notation inside Jinja2 blocks — `tasks[:10]` or `tasks[0:5]`
+    inside `{% %}` blocks is INVALID Jinja2 and will cause a TemplateSyntaxError.
+    To limit displayed items use: `{% if loop.index <= 10 %}...{% endif %}` inside the loop.
 
 EXAMPLE of correct vs wrong:
 
@@ -325,7 +326,7 @@ def _render_jinja_preview(template_str: str, json_data: dict) -> str:
     """Render Jinja2 template with actual JSON data for frontend preview.
     Uses SafeDict so missing/hallucinated variables return '' instead of crashing."""
     from datetime import date, datetime
-    from main import _make_safe, SafeDict, _DateAwareEnvironment
+    from main import _make_safe, SafeDict, _DateAwareEnvironment, _preprocess_template
 
     today_str = date.today().isoformat()
 
@@ -348,23 +349,30 @@ def _render_jinja_preview(template_str: str, json_data: dict) -> str:
 
     env = _DateAwareEnvironment(autoescape=False, undefined=ChainableUndefined)
     env.filters["strftime"] = _strftime_filter
+    env.filters["now"] = lambda _value=None, fmt="%Y-%m-%d": today_str
+    env.filters["date"] = _strftime_filter
+
+    # Always preprocess to fix common AI-generated Jinja2 syntax issues (e.g. slice notation)
+    preprocessed = _preprocess_template(template_str)
+
+    safe = _make_safe(json_data)
+    render_kwargs = dict(
+        project=safe.get("project", SafeDict()),
+        user=safe.get("user", SafeDict()),
+        tasks=safe.get("tasks", []),
+        subtasks=safe.get("subtasks", []),
+        all_tasks=safe.get("all_tasks", safe.get("tasks", [])),
+        summary=safe.get("summary", SafeDict()),
+        workspace=safe.get("workspace", SafeDict()),
+        scope=safe.get("scope", SafeDict()),
+        projects_contributed=safe.get("projects_contributed", []),
+        projects_breakdown=safe.get("projects_breakdown", []),
+        now=_CallableStr(today_str),
+        today=_CallableStr(today_str),
+    )
     try:
-        tmpl = env.from_string(template_str)
-        safe = _make_safe(json_data)
-        return tmpl.render(
-            project=safe.get("project", SafeDict()),
-            user=safe.get("user", SafeDict()),
-            tasks=safe.get("tasks", []),
-            subtasks=safe.get("subtasks", []),
-            all_tasks=safe.get("all_tasks", safe.get("tasks", [])),
-            summary=safe.get("summary", SafeDict()),
-            workspace=safe.get("workspace", SafeDict()),
-            scope=safe.get("scope", SafeDict()),
-            projects_contributed=safe.get("projects_contributed", []),
-            projects_breakdown=safe.get("projects_breakdown", []),
-            now=_CallableStr(today_str),
-            today=_CallableStr(today_str),
-        )
+        tmpl = env.from_string(preprocessed)
+        return tmpl.render(**render_kwargs)
     except Exception as e:
         print(f"Jinja2 preview render error: {e}")
         return template_str  # fallback: return template as-is

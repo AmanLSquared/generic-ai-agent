@@ -68,26 +68,32 @@ async def _paginate_tasks(
     client: httpx.AsyncClient,
     headers: dict,
     params: dict,
-    max_tasks: int = 1000,
+    max_tasks: int | None = 1000,
+    url: str | None = None,
 ) -> list:
-    """Fetch ALL tasks across multiple pages (Asana default is 20/page, max 100/page)."""
+    """Fetch ALL tasks across multiple pages (Asana default is 20/page, max 100/page).
+
+    url: override the default /tasks endpoint (e.g. /user_task_lists/{gid}/tasks).
+    max_tasks=None: no cap, paginate until all tasks are fetched.
+    """
     all_tasks: list = []
     fetch_params = {**params, "limit": 100}  # always request maximum page size
     offset: str | None = None
+    endpoint = url if url else f"{ASANA_BASE}/tasks"
 
     while True:
         if offset:
             fetch_params["offset"] = offset
-        resp = await client.get(f"{ASANA_BASE}/tasks", headers=headers, params=fetch_params)
+        resp = await client.get(endpoint, headers=headers, params=fetch_params)
         resp.raise_for_status()
         body = resp.json()
         all_tasks.extend(body.get("data", []))
         next_page = body.get("next_page")
-        if not next_page or len(all_tasks) >= max_tasks:
+        if not next_page or (max_tasks is not None and len(all_tasks) >= max_tasks):
             break
         offset = next_page["offset"]
 
-    return all_tasks[:max_tasks]
+    return all_tasks[:max_tasks] if max_tasks is not None else all_tasks
 
 
 def _build_task_summary(tasks: list, today: str) -> dict:
@@ -116,13 +122,14 @@ async def _fetch_user_scope(
     today: str,
 ) -> dict:
     """Fetch all tasks assigned to a specific user (or 'me'), including subtasks."""
-    import asyncio
+    # Always resolve the token owner GID so we know if the target user is "self".
+    me_resp = await client.get(f"{ASANA_BASE}/users/me", headers=headers)
+    me_resp.raise_for_status()
+    me_data = me_resp.json()["data"]
+    me_gid = me_data["gid"]
 
     if scope_gid == "me":
-        me_resp = await client.get(f"{ASANA_BASE}/users/me", headers=headers)
-        me_resp.raise_for_status()
-        me_data = me_resp.json()["data"]
-        scope_gid = me_data["gid"]
+        scope_gid = me_gid
         user_name = me_data.get("name", "")
         user_email = me_data.get("email", "")
     else:
@@ -136,15 +143,45 @@ async def _fetch_user_scope(
         user_name = u.get("name", "")
         user_email = u.get("email", "")
 
-    tasks_raw = await _paginate_tasks(
-        client, headers,
-        {
-            "assignee": scope_gid,
-            "workspace": workspace["id"],
-            "opt_fields": "name,due_on,completed,tags.name,memberships.project.name,num_subtasks",
-            "completed_since": "2000-01-01T00:00:00.000Z",
-        },
-    )
+    is_self = scope_gid == me_gid
+
+    if is_self:
+        # The user_task_list endpoint is the only API that returns the exact same
+        # set of tasks shown in Asana's "My Tasks" dashboard (including subtasks
+        # that are NOT cross-listed in any project). It is restricted to the
+        # authenticated user (token owner) — fetching another user's task list
+        # returns 403 Forbidden.
+        task_list_resp = await client.get(
+            f"{ASANA_BASE}/users/{scope_gid}/user_task_list",
+            headers=headers,
+            params={"workspace": workspace["id"], "opt_fields": "gid"},
+        )
+        task_list_resp.raise_for_status()
+        task_list_gid = task_list_resp.json()["data"]["gid"]
+
+        tasks_raw = await _paginate_tasks(
+            client, headers,
+            {
+                "opt_fields": "name,due_on,completed,tags.name,memberships.project.name,num_subtasks",
+                "completed_since": "2000-01-01T00:00:00.000Z",
+            },
+            max_tasks=None,  # no cap — fetch every page to match My Tasks count exactly
+            url=f"{ASANA_BASE}/user_task_lists/{task_list_gid}/tasks",
+        )
+    else:
+        # For other users the user_task_list API is forbidden. The assignee+workspace
+        # filter is the best available option. The 1000-task cap is removed so all
+        # pages are fetched.
+        tasks_raw = await _paginate_tasks(
+            client, headers,
+            {
+                "assignee": scope_gid,
+                "workspace": workspace["id"],
+                "opt_fields": "name,due_on,completed,tags.name,memberships.project.name,num_subtasks",
+                "completed_since": "2000-01-01T00:00:00.000Z",
+            },
+            max_tasks=None,  # no cap — fetch all pages
+        )
 
     parent_tasks = []
     projects_set: set[str] = set()
@@ -169,28 +206,14 @@ async def _fetch_user_scope(
             "parent_id": "",
             "parent_name": "",
             "num_subtasks": t.get("num_subtasks", 0) or 0,
+            "subtasks": [],
         })
 
-    # Fetch subtasks in parallel for tasks that have them
-    tasks_with_subtasks = [t for t in parent_tasks if t["num_subtasks"] > 0]
-    subtask_results = await asyncio.gather(
-        *[_fetch_subtasks(client, headers, t, today) for t in tasks_with_subtasks],
-        return_exceptions=True,
-    )
-
-    all_subtasks = []
-    for result in subtask_results:
-        if isinstance(result, list):
-            all_subtasks.extend(result)
-
-    # Attach subtask list to each parent task
-    subtasks_by_parent = {}
-    for st in all_subtasks:
-        subtasks_by_parent.setdefault(st["parent_id"], []).append(st)
-    for t in parent_tasks:
-        t["subtasks"] = subtasks_by_parent.get(t["id"], [])
-
-    all_tasks_flat = parent_tasks + all_subtasks
+    # GET /tasks?assignee=USER already returns ALL tasks assigned to that user,
+    # which includes subtasks assigned to them. No additional subtask fetching is
+    # needed here — doing so would pull in subtasks assigned to OTHER people and
+    # inflate the count beyond what Asana shows in the user task view.
+    all_tasks_flat = parent_tasks
     summary = _build_task_summary(all_tasks_flat, today)
 
     # Per-project task breakdown for charts
@@ -211,7 +234,7 @@ async def _fetch_user_scope(
 
     print(
         f"Fetched user scope for user_gid={scope_gid}: "
-        f"{len(parent_tasks)} tasks + {len(all_subtasks)} subtasks = {len(all_tasks_flat)} total, "
+        f"{len(all_tasks_flat)} tasks (assigned to user), "
         f"summary={summary}"
     )
     return {
@@ -221,7 +244,7 @@ async def _fetch_user_scope(
         "projects_contributed": sorted(projects_set),
         "projects_breakdown": projects_breakdown_list,
         "tasks": parent_tasks,
-        "subtasks": all_subtasks,
+        "subtasks": [],
         "all_tasks": all_tasks_flat,
         "summary": summary,
     }
@@ -231,30 +254,56 @@ async def _fetch_subtasks(
     client: httpx.AsyncClient,
     headers: dict,
     parent_task: dict,
-    today: str,
+    seen_gids: set,
 ) -> list:
-    """Fetch all subtasks for a given parent task."""
+    """Recursively fetch ALL subtasks at all depths for a given task.
+
+    seen_gids is a shared set (pre-seeded with parent task GIDs) used to skip
+    tasks already counted as direct project/user members and to avoid cycles.
+    """
+    import asyncio
+
     try:
-        resp = await client.get(
-            f"{ASANA_BASE}/tasks/{parent_task['id']}/subtasks",
-            headers=headers,
-            params={
-                "opt_fields": "name,assignee.name,due_on,completed,tags.name,num_subtasks",
-                "limit": 100,
-            },
-        )
-        resp.raise_for_status()
-        subtasks_raw = resp.json().get("data", [])
+        subtasks_raw: list = []
+        fetch_params: dict = {
+            "opt_fields": "name,assignee.name,due_on,completed,tags.name,num_subtasks",
+            "limit": 100,
+        }
+        offset: str | None = None
+        while True:
+            if offset:
+                fetch_params["offset"] = offset
+            resp = await client.get(
+                f"{ASANA_BASE}/tasks/{parent_task['id']}/subtasks",
+                headers=headers,
+                params=fetch_params,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            subtasks_raw.extend(body.get("data", []))
+            next_page = body.get("next_page")
+            if not next_page:
+                break
+            offset = next_page["offset"]
     except Exception as e:
         print(f"Warning: could not fetch subtasks for {parent_task['id']}: {e}")
         return []
 
-    subtasks = []
+    collected = []
+    tasks_needing_recursion = []
+
     for s in subtasks_raw:
+        gid = s.get("gid", "")
+        if not gid or gid in seen_gids:
+            # already a direct project/user member or already visited — skip
+            continue
+        seen_gids.add(gid)
+
         assignee = s.get("assignee") or {}
         tags = [tag.get("name", "") for tag in (s.get("tags") or [])]
-        subtasks.append({
-            "id": s.get("gid", ""),
+        num_sub = s.get("num_subtasks", 0) or 0
+        subtask_dict = {
+            "id": gid,
             "name": s.get("name", ""),
             "assignee": assignee.get("name", "") if isinstance(assignee, dict) else "",
             "due_date": s.get("due_on") or "",
@@ -263,8 +312,30 @@ async def _fetch_subtasks(
             "is_subtask": True,
             "parent_id": parent_task["id"],
             "parent_name": parent_task["name"],
-        })
-    return subtasks
+            "num_subtasks": num_sub,
+            "subtasks": [],  # populated below after recursive fetch
+        }
+        collected.append(subtask_dict)
+        if num_sub > 0:
+            tasks_needing_recursion.append(subtask_dict)
+
+    # Recurse into subtasks-of-subtasks in parallel
+    if tasks_needing_recursion:
+        nested_results = await asyncio.gather(
+            *[_fetch_subtasks(client, headers, t, seen_gids) for t in tasks_needing_recursion],
+            return_exceptions=True,
+        )
+        nested_by_parent: dict = {}
+        for result in nested_results:
+            if isinstance(result, list):
+                collected.extend(result)
+                for nt in result:
+                    nested_by_parent.setdefault(nt["parent_id"], []).append(nt)
+        # Attach direct children to their immediate parent subtask
+        for t in tasks_needing_recursion:
+            t["subtasks"] = nested_by_parent.get(t["id"], [])
+
+    return collected
 
 
 async def _fetch_project_scope(
@@ -316,10 +387,13 @@ async def _fetch_project_scope(
             "num_subtasks": t.get("num_subtasks", 0) or 0,
         })
 
-    # Fetch subtasks in parallel for tasks that have them
+    # Fetch all subtasks recursively (including subtasks-of-subtasks at all depths).
+    # Pre-seed seen_gids with parent task GIDs so that subtasks which are also direct
+    # project members are not double-counted.
+    seen_gids: set = {t["id"] for t in parent_tasks}
     tasks_with_subtasks = [t for t in parent_tasks if t["num_subtasks"] > 0]
     subtask_results = await asyncio.gather(
-        *[_fetch_subtasks(client, headers, t, today) for t in tasks_with_subtasks],
+        *[_fetch_subtasks(client, headers, t, seen_gids) for t in tasks_with_subtasks],
         return_exceptions=True,
     )
 
@@ -328,8 +402,8 @@ async def _fetch_project_scope(
         if isinstance(result, list):
             all_subtasks.extend(result)
 
-    # Attach subtask list to each parent task for template use
-    subtasks_by_parent = {}
+    # Attach direct subtasks to each parent task for template use
+    subtasks_by_parent: dict = {}
     for st in all_subtasks:
         subtasks_by_parent.setdefault(st["parent_id"], []).append(st)
 

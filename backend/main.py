@@ -68,6 +68,27 @@ def _make_safe(obj):
     return obj
 
 
+def _preprocess_template(template_str: str) -> str:
+    """
+    Fix common AI-generated Jinja2 syntax errors before the template is compiled.
+
+    Known issue: the AI sometimes emits Python slice notation inside {% %} blocks,
+    e.g. `{% for t in tasks[:10] %}` or `{% for t in all_tasks[0:5] %}`.
+    Jinja2 does NOT support Python slice syntax and raises:
+        TemplateSyntaxError: expected token 'end of statement block', got '['
+    Fix: strip the slice from every {% ... %} block so `tasks[:10]` becomes `tasks`.
+    """
+    import re as _re2
+
+    def _fix_block(m):
+        # Remove Python-style slice notation [start:end] / [:end] / [start:] from
+        # inside {% %} statement blocks only (not from {{ }} expressions).
+        fixed = _re2.sub(r'\[\d*:\d*\]', '', m.group(1))
+        return '{%' + fixed + '%}'
+
+    return _re2.sub(r'\{%(.*?)%\}', _fix_block, template_str, flags=_re2.DOTALL)
+
+
 def _jinja_render(template_str: str, asana_data: dict) -> str:
     from datetime import date, datetime
 
@@ -95,7 +116,9 @@ def _jinja_render(template_str: str, asana_data: dict) -> str:
 
     env = _DateAwareEnvironment(autoescape=False, undefined=ChainableUndefined)
     env.filters["strftime"] = _strftime_filter
-    tmpl = env.from_string(template_str)
+    env.filters["now"] = lambda _value=None, fmt="%Y-%m-%d": today_str
+    env.filters["date"] = _strftime_filter
+    tmpl = env.from_string(_preprocess_template(template_str))
     safe = _make_safe(asana_data)
     return tmpl.render(
         project=safe.get("project", SafeDict()),
@@ -205,10 +228,36 @@ async def render_dashboard(
 
         html_template = dashboard.html_template
 
-    if project_id:
-        asana_data = await fetch_asana_data(pat, scope_type="project", scope_gid=project_id)
-    else:
-        asana_data = await fetch_asana_data(pat, scope_type="user", scope_gid=user_id)
+    import httpx
 
-    rendered = _jinja_render(html_template, asana_data)
+    try:
+        if project_id:
+            asana_data = await fetch_asana_data(pat, scope_type="project", scope_gid=project_id)
+        else:
+            asana_data = await fetch_asana_data(pat, scope_type="user", scope_gid=user_id)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status == 400:
+            return HTMLResponse(
+                f"<h1>Invalid Asana GID</h1><p>The provided ID is not a valid Asana GID. "
+                f"Asana GIDs are numeric strings (e.g. 1234567890123456), not UUIDs.</p>",
+                status_code=400,
+            )
+        elif status == 401:
+            return HTMLResponse("<h1>Asana authentication failed</h1><p>Check your PAT.</p>", status_code=401)
+        elif status == 404:
+            return HTMLResponse("<h1>Asana resource not found</h1>", status_code=404)
+        else:
+            return HTMLResponse(
+                f"<h1>Asana API error ({status})</h1><p>{e.response.text}</p>",
+                status_code=502,
+            )
+
+    try:
+        rendered = _jinja_render(html_template, asana_data)
+    except Exception as tmpl_err:
+        return HTMLResponse(
+            f"<h1>Template render error</h1><pre>{tmpl_err}</pre>",
+            status_code=500,
+        )
     return HTMLResponse(content=rendered)
