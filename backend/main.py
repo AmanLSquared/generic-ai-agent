@@ -131,6 +131,9 @@ def _jinja_render(template_str: str, asana_data: dict) -> str:
         scope=safe.get("scope", SafeDict()),
         projects_contributed=safe.get("projects_contributed", []),
         projects_breakdown=safe.get("projects_breakdown", []),
+        sections=safe.get("sections", []),
+        sections_breakdown=safe.get("sections_breakdown", []),
+        assignee_breakdown=safe.get("assignee_breakdown", []),
         now=_CallableStr(today_str),
         today=_CallableStr(today_str),
     )

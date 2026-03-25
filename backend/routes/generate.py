@@ -29,8 +29,18 @@ Available Jinja2 variables:
   project.overdue_tasks  — overdue count (int)
   project.completion_rate   — completion % (float)
 
+  sections               — ordered list of project sections:
+    s.id, s.name
+
+  sections_breakdown     — per-section task counts (use for "tasks by section" bar charts):
+    s.name, s.total (int), s.completed (int), s.incomplete (int), s.overdue (int)
+
+  assignee_breakdown     — per-assignee task counts (use for "tasks by assignee" bar charts):
+    a.assignee (string), a.total (int), a.completed (int), a.incomplete (int), a.overdue (int)
+
   tasks                  — list of parent task objects:
     t.name, t.assignee, t.due_date, t.completed (bool), t.tags (list),
+    t.section (string — section this task belongs to),
     t.is_subtask (False), t.num_subtasks (int), t.subtasks (list of subtask objects)
 
   subtasks               — flat list of all subtask objects:
@@ -55,6 +65,12 @@ RULES — read carefully, violating any rule is wrong:
      labels: [{% for t in tasks %}"{{ t.name }}"{% if not loop.last %},{% endif %}{% endfor %}]
 6. Member workload bar chart labels and data:
      labels: [{% for m in project.team_members %}"{{ m }}"{% if not loop.last %},{% endif %}{% endfor %}]
+   "Total Overdue Tasks by Assignee" bar chart (use assignee_breakdown):
+     labels: [{% for a in assignee_breakdown %}"{{ a.assignee }}"{% if not loop.last %},{% endif %}{% endfor %}]
+     data:   [{% for a in assignee_breakdown %}{{ a.overdue }}{% if not loop.last %},{% endif %}{% endfor %}]
+   "Incomplete Tasks by Section" bar chart (use sections_breakdown):
+     labels: [{% for s in sections_breakdown %}"{{ s.name }}"{% if not loop.last %},{% endif %}{% endfor %}]
+     data:   [{% for s in sections_breakdown %}{{ s.incomplete }}{% if not loop.last %},{% endif %}{% endfor %}]
 7. Include all CSS in a <style> tag — the file must be self-contained.
 8. Load Chart.js from CDN: https://cdn.jsdelivr.net/npm/chart.js
 9. Design: modern card-based layout, subtle shadows, smooth colors, responsive grid.
@@ -241,6 +257,15 @@ def _schema_only(data: dict) -> dict:
             }
         ],
         "all_tasks": "<flat list of all tasks + subtasks combined — use for summary charts>",
+        "sections": [
+            {"id": "<section_gid>", "name": "<section_name>"}
+        ],
+        "sections_breakdown": [
+            {"name": "<section_name>", "total": "<int>", "completed": "<int>", "incomplete": "<int>", "overdue": "<int>"}
+        ],
+        "assignee_breakdown": [
+            {"assignee": "<assignee_name or Unassigned>", "total": "<int>", "completed": "<int>", "incomplete": "<int>", "overdue": "<int>"}
+        ],
         "summary": {
             "total_tasks": "<int — includes subtasks>",
             "completed_tasks": "<int>",
@@ -367,6 +392,9 @@ def _render_jinja_preview(template_str: str, json_data: dict) -> str:
         scope=safe.get("scope", SafeDict()),
         projects_contributed=safe.get("projects_contributed", []),
         projects_breakdown=safe.get("projects_breakdown", []),
+        sections=safe.get("sections", []),
+        sections_breakdown=safe.get("sections_breakdown", []),
+        assignee_breakdown=safe.get("assignee_breakdown", []),
         now=_CallableStr(today_str),
         today=_CallableStr(today_str),
     )

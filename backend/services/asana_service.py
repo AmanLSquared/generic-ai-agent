@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import base64
 from datetime import date
@@ -36,6 +38,32 @@ _SSL_VERIFY = os.getenv("HTTPX_SSL_VERIFY", "true").lower() != "false"
 def _client(**kwargs) -> httpx.AsyncClient:
     """Return a configured AsyncClient. Set HTTPX_SSL_VERIFY=false in .env to skip SSL verification."""
     return httpx.AsyncClient(verify=_SSL_VERIFY, **kwargs)
+
+
+async def _get_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict,
+    params: dict | None = None,
+    max_retries: int = 4,
+) -> httpx.Response:
+    """GET with exponential backoff on 429 rate-limit responses.
+
+    Asana returns a `Retry-After` header (seconds) on 429. We honour it when
+    present and fall back to doubling the wait each attempt (1s, 2s, 4s, 8s).
+    """
+    delay = 1.0
+    for attempt in range(max_retries):
+        resp = await client.get(url, headers=headers, params=params)
+        if resp.status_code != 429:
+            return resp
+        retry_after = float(resp.headers.get("Retry-After", delay))
+        print(f"Asana 429 rate-limit on {url} — retrying in {retry_after:.1f}s (attempt {attempt + 1}/{max_retries})")
+        await asyncio.sleep(retry_after)
+        delay = min(delay * 2, 30.0)
+    # Final attempt — let the caller handle the status
+    return await client.get(url, headers=headers, params=params)
 
 
 async def test_asana_token(pat: str) -> dict | None:
@@ -84,7 +112,7 @@ async def _paginate_tasks(
     while True:
         if offset:
             fetch_params["offset"] = offset
-        resp = await client.get(endpoint, headers=headers, params=fetch_params)
+        resp = await _get_with_retry(client, endpoint, headers=headers, params=fetch_params)
         resp.raise_for_status()
         body = resp.json()
         all_tasks.extend(body.get("data", []))
@@ -144,6 +172,9 @@ async def _fetch_user_scope(
         user_email = u.get("email", "")
 
     is_self = scope_gid == me_gid
+    
+    # Debug log to verify user info and scope resolution
+    print("[ASANA RAW] /users/me JSON:\n" + json.dumps(me_data, indent=2, default=str)) 
 
     if is_self:
         # The user_task_list endpoint is the only API that returns the exact same
@@ -182,6 +213,9 @@ async def _fetch_user_scope(
             },
             max_tasks=None,  # no cap — fetch all pages
         )
+
+    # Debug log to verify task fetching and structure before processing    
+    print("[ASANA RAW] User tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
 
     parent_tasks = []
     projects_set: set[str] = set()
@@ -261,8 +295,6 @@ async def _fetch_subtasks(
     seen_gids is a shared set (pre-seeded with parent task GIDs) used to skip
     tasks already counted as direct project/user members and to avoid cycles.
     """
-    import asyncio
-
     try:
         subtasks_raw: list = []
         fetch_params: dict = {
@@ -273,7 +305,8 @@ async def _fetch_subtasks(
         while True:
             if offset:
                 fetch_params["offset"] = offset
-            resp = await client.get(
+            resp = await _get_with_retry(
+                client,
                 f"{ASANA_BASE}/tasks/{parent_task['id']}/subtasks",
                 headers=headers,
                 params=fetch_params,
@@ -345,35 +378,71 @@ async def _fetch_project_scope(
     project_gid: str,
     today: str,
 ) -> dict:
-    """Fetch a single project, all its tasks, and all subtasks."""
-    import asyncio
-
-    proj_resp = await client.get(
-        f"{ASANA_BASE}/projects/{project_gid}",
-        headers=headers,
-        params={"opt_fields": "name,current_status,due_date,members.name,completed,gid"},
+    """Fetch a single project, all its tasks (with section info), and all subtasks."""
+    # Fetch project details and sections in parallel
+    proj_resp, sections_resp = await asyncio.gather(
+        client.get(
+            f"{ASANA_BASE}/projects/{project_gid}",
+            headers=headers,
+            params={"opt_fields": "name,current_status,due_date,members.name,completed,gid"},
+        ),
+        client.get(
+            f"{ASANA_BASE}/projects/{project_gid}/sections",
+            headers=headers,
+            params={"opt_fields": "name,gid"},
+        ),
     )
     proj_resp.raise_for_status()
+    sections_resp.raise_for_status()
+
     proj = proj_resp.json()["data"]
+    sections_raw = sections_resp.json().get("data", [])
+
+    # Debug log to verify project details fetching and structure before processing
+    print("[ASANA RAW] Project details JSON:\n" + json.dumps(proj, indent=2, default=str))
+    print("[ASANA RAW] Project sections JSON:\n" + json.dumps(sections_raw, indent=2, default=str))
 
     status_obj = proj.get("current_status") or {}
     status = status_obj.get("text", "") if isinstance(status_obj, dict) else ""
     members = [m.get("name", "") for m in (proj.get("members") or [])]
 
+    # Build an ordered sections list (preserves Asana board order)
+    sections_list = [{"id": s.get("gid", ""), "name": s.get("name", "")} for s in sections_raw]
+
+    # Include memberships so we can extract the section each task belongs to
     tasks_raw = await _paginate_tasks(
         client, headers,
         {
             "project": project_gid,
-            "opt_fields": "name,assignee.name,due_on,completed,tags.name,num_subtasks",
+            "opt_fields": (
+                "name,assignee.name,due_on,completed,tags.name,num_subtasks,"
+                "memberships.section.name,memberships.section.gid,"
+                "memberships.project.gid"
+            ),
             "completed_since": "2000-01-01T00:00:00.000Z",
         },
     )
+
+    # Debug log to verify task fetching and structure before processing
+    print("[ASANA RAW] Project tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
 
     # Build parent task list
     parent_tasks = []
     for t in tasks_raw:
         assignee = t.get("assignee") or {}
         tags = [tag.get("name", "") for tag in (t.get("tags") or [])]
+
+        # Find the section membership that belongs to this project
+        section_name = ""
+        section_gid = ""
+        for mem in (t.get("memberships") or []):
+            mem_proj = mem.get("project") or {}
+            if mem_proj.get("gid") == project_gid:
+                mem_sec = mem.get("section") or {}
+                section_name = mem_sec.get("name", "")
+                section_gid = mem_sec.get("gid", "")
+                break
+
         parent_tasks.append({
             "id": t.get("gid", ""),
             "name": t.get("name", ""),
@@ -381,6 +450,8 @@ async def _fetch_project_scope(
             "due_date": t.get("due_on") or "",
             "completed": t.get("completed", False),
             "tags": tags,
+            "section": section_name,
+            "section_gid": section_gid,
             "is_subtask": False,
             "parent_id": "",
             "parent_name": "",
@@ -423,16 +494,55 @@ async def _fetch_project_scope(
         **summary,
     }
 
+    # Build per-section breakdown (only parent tasks have section info)
+    sections_breakdown: dict[str, dict] = {}
+    for sec in sections_list:
+        sections_breakdown[sec["name"]] = {"total": 0, "completed": 0, "incomplete": 0, "overdue": 0}
+    for t in parent_tasks:
+        sec_name = t.get("section") or "No Section"
+        if sec_name not in sections_breakdown:
+            sections_breakdown[sec_name] = {"total": 0, "completed": 0, "incomplete": 0, "overdue": 0}
+        sections_breakdown[sec_name]["total"] += 1
+        if t.get("completed"):
+            sections_breakdown[sec_name]["completed"] += 1
+        else:
+            sections_breakdown[sec_name]["incomplete"] += 1
+            if t.get("due_date") and t["due_date"] < today:
+                sections_breakdown[sec_name]["overdue"] += 1
+
+    sections_breakdown_list = [{"name": k, **v} for k, v in sections_breakdown.items()]
+
+    # Build per-assignee breakdown (parent tasks + subtasks so counts match all_tasks_flat)
+    assignee_breakdown: dict[str, dict] = {}
+    for t in all_tasks_flat:
+        assignee = t.get("assignee") or "Unassigned"
+        if not assignee:
+            assignee = "Unassigned"
+        if assignee not in assignee_breakdown:
+            assignee_breakdown[assignee] = {"total": 0, "completed": 0, "incomplete": 0, "overdue": 0}
+        assignee_breakdown[assignee]["total"] += 1
+        if t.get("completed"):
+            assignee_breakdown[assignee]["completed"] += 1
+        else:
+            assignee_breakdown[assignee]["incomplete"] += 1
+            if t.get("due_date") and t["due_date"] < today:
+                assignee_breakdown[assignee]["overdue"] += 1
+
+    assignee_breakdown_list = [{"assignee": k, **v} for k, v in assignee_breakdown.items()]
+
     print(
         f"Fetched project scope for project_gid={project_gid}: "
         f"{len(parent_tasks)} tasks + {len(all_subtasks)} subtasks = {len(all_tasks_flat)} total, "
-        f"summary={summary}"
+        f"{len(sections_list)} sections, {len(assignee_breakdown_list)} assignees, summary={summary}"
     )
     return {
         "scope": {"type": "project", "gid": project_gid, "name": proj.get("name", "")},
         "workspace": workspace,
         "project": project_info,
-        "tasks": parent_tasks,        # parent tasks (each has .subtasks list)
+        "sections": sections_list,                      # ordered list of sections [{id, name}]
+        "sections_breakdown": sections_breakdown_list,  # per-section task counts
+        "assignee_breakdown": assignee_breakdown_list,  # per-assignee task counts (total/completed/incomplete/overdue)
+        "tasks": parent_tasks,        # parent tasks (each has .subtasks list and .section)
         "subtasks": all_subtasks,     # flat subtask list
         "all_tasks": all_tasks_flat,  # parents + subtasks combined (for charts/summary)
         "summary": summary,
