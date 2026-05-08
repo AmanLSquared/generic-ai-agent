@@ -174,7 +174,7 @@ async def _fetch_user_scope(
     is_self = scope_gid == me_gid
     
     # Debug log to verify user info and scope resolution
-    print("[ASANA RAW] /users/me JSON:\n" + json.dumps(me_data, indent=2, default=str)) 
+    # print("[ASANA RAW] /users/me JSON:\n" + json.dumps(me_data, indent=2, default=str)) 
 
     if is_self:
         # The user_task_list endpoint is the only API that returns the exact same
@@ -215,7 +215,7 @@ async def _fetch_user_scope(
         )
 
     # Debug log to verify task fetching and structure before processing    
-    print("[ASANA RAW] User tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
+    # print("[ASANA RAW] User tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
 
     parent_tasks = []
     projects_set: set[str] = set()
@@ -399,8 +399,8 @@ async def _fetch_project_scope(
     sections_raw = sections_resp.json().get("data", [])
 
     # Debug log to verify project details fetching and structure before processing
-    print("[ASANA RAW] Project details JSON:\n" + json.dumps(proj, indent=2, default=str))
-    print("[ASANA RAW] Project sections JSON:\n" + json.dumps(sections_raw, indent=2, default=str))
+    # print("[ASANA RAW] Project details JSON:\n" + json.dumps(proj, indent=2, default=str))
+    # print("[ASANA RAW] Project sections JSON:\n" + json.dumps(sections_raw, indent=2, default=str))
 
     status_obj = proj.get("current_status") or {}
     status = status_obj.get("text", "") if isinstance(status_obj, dict) else ""
@@ -424,7 +424,7 @@ async def _fetch_project_scope(
     )
 
     # Debug log to verify task fetching and structure before processing
-    print("[ASANA RAW] Project tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
+    # print("[ASANA RAW] Project tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
 
     # Build parent task list
     parent_tasks = []

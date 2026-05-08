@@ -79,6 +79,8 @@ RULES — read carefully, violating any rule is wrong:
 12. NEVER use Python slice notation inside Jinja2 blocks — `tasks[:10]` or `tasks[0:5]`
     inside `{% %}` blocks is INVALID Jinja2 and will cause a TemplateSyntaxError.
     To limit displayed items use: `{% if loop.index <= 10 %}...{% endif %}` inside the loop.
+13. NEVER use `{% break %}` or `{% continue %}` — these are NOT valid Jinja2 tags and will
+    cause a TemplateSyntaxError. Use `{% if loop.index <= N %}` to limit iterations instead.
 
   WRONG:  <h1>Intel - Projects</h1>
   RIGHT:  <h1>{{ project.name }}</h1>
@@ -145,6 +147,8 @@ RULES — read carefully, violating any rule is wrong:
 13. NEVER use Python slice notation inside Jinja2 blocks — `tasks[:10]` or `tasks[0:5]`
     inside `{% %}` blocks is INVALID Jinja2 and will cause a TemplateSyntaxError.
     To limit displayed items use: `{% if loop.index <= 10 %}...{% endif %}` inside the loop.
+14. NEVER use `{% break %}` or `{% continue %}` — these are NOT valid Jinja2 tags and will
+    cause a TemplateSyntaxError. Use `{% if loop.index <= N %}` to limit iterations instead.
 
 EXAMPLE of correct vs wrong:
 
@@ -168,6 +172,8 @@ Rules:
 1. Return the COMPLETE updated Jinja2 HTML template — every line, from <!DOCTYPE html> to </html>.
 2. CRITICAL: This is a Jinja2 template. It contains {{ variable }} expressions and {% %} blocks.
    - PRESERVE all Jinja2 expressions exactly — do NOT replace them with hardcoded values.
+   - NEVER use `{% break %}` or `{% continue %}` — invalid Jinja2 tags that cause TemplateSyntaxError.
+   - NEVER use Python slice notation like `tasks[:10]` inside `{% %}` blocks.
    - Do NOT remove any {{ }} or {% %} blocks unless the user explicitly asks.
 3. Only change what the user asks for (theme, layout, colors, chart type, new section, etc.).
 4. Keep all Chart.js CDN references and the self-contained CSS structure intact.

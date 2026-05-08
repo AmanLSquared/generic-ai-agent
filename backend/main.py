@@ -86,7 +86,15 @@ def _preprocess_template(template_str: str) -> str:
         fixed = _re2.sub(r'\[\d*:\d*\]', '', m.group(1))
         return '{%' + fixed + '%}'
 
-    return _re2.sub(r'\{%(.*?)%\}', _fix_block, template_str, flags=_re2.DOTALL)
+    result = _re2.sub(r'\{%(.*?)%\}', _fix_block, template_str, flags=_re2.DOTALL)
+
+    # Remove {% break %} and {% continue %} — these are not valid Jinja2 tags.
+    # The AI sometimes emits them inside loops; silently dropping them is safe
+    # because Jinja2 always iterates the full loop anyway.
+    result = _re2.sub(r'\{%-?\s*break\s*-?%\}', '', result)
+    result = _re2.sub(r'\{%-?\s*continue\s*-?%\}', '', result)
+
+    return result
 
 
 def _jinja_render(template_str: str, asana_data: dict) -> str:
@@ -218,6 +226,30 @@ async def render_dashboard(
         if not dashboard.html_template:
             return HTMLResponse(
                 "<h1>No Jinja2 template found. Re-save the dashboard to generate a template.</h1>",
+                status_code=400,
+            )
+
+        # Scope-type guard: the template was built for a specific scope type.
+        # Rendering it with the wrong scope type produces silently wrong output.
+        stored_scope = dashboard.asana_scope_type  # "project" | "user" | None
+        if stored_scope == "project" and user_id and not project_id:
+            return HTMLResponse(
+                "<h1>Scope mismatch</h1>"
+                "<p>This dashboard was built for a <strong>project</strong> scope. "
+                "Pass <code>?project_id=GID</code> instead of <code>?user_id</code>.</p>",
+                status_code=400,
+            )
+        if stored_scope == "user" and project_id and not user_id:
+            return HTMLResponse(
+                "<h1>Scope mismatch</h1>"
+                "<p>This dashboard was built for a <strong>user</strong> scope. "
+                "Pass <code>?user_id=GID</code> instead of <code>?project_id</code>.</p>",
+                status_code=400,
+            )
+        if project_id and user_id:
+            return HTMLResponse(
+                "<h1>Ambiguous request</h1>"
+                "<p>Provide either <code>?project_id</code> or <code>?user_id</code>, not both.</p>",
                 status_code=400,
             )
 
