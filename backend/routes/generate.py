@@ -39,13 +39,21 @@ Available Jinja2 variables:
     a.assignee (string), a.total (int), a.completed (int), a.incomplete (int), a.overdue (int)
 
   tasks                  — list of parent task objects:
-    t.name, t.assignee, t.due_date, t.completed (bool), t.tags (list),
-    t.section (string — section this task belongs to),
+    t.name, t.assignee, t.due_date, t.completed (bool), t.completed_at (ISO datetime or empty),
+    t.tags (list), t.section (string — section this task belongs to),
     t.is_subtask (False), t.num_subtasks (int), t.subtasks (list of subtask objects)
 
   subtasks               — flat list of all subtask objects:
-    st.name, st.assignee, st.due_date, st.completed (bool), st.tags (list),
-    st.is_subtask (True), st.parent_id, st.parent_name
+    st.name, st.assignee, st.due_date, st.completed (bool), st.completed_at (ISO datetime or empty),
+    st.tags (list), st.is_subtask (True), st.parent_id, st.parent_name
+
+  NOTE — Task Completion Over Time chart:
+    Use t.completed_at to build completion-over-time data in JavaScript:
+      const byDate = {};
+      {% for t in all_tasks %}{% if t.completed and t.completed_at %}
+      byDate["{{ t.completed_at[:10] }}"] = (byDate["{{ t.completed_at[:10] }}"] || 0) + 1;
+      {% endif %}{% endfor %}
+    Sort the keys and plot as a bar/line chart. For cumulative lines, accumulate the counts.
 
   all_tasks              — parents + subtasks combined (use for charts/summary accuracy)
 
@@ -114,12 +122,21 @@ Available Jinja2 variables:
     p.name, p.total (int), p.completed (int), p.overdue (int)
 
   tasks                  — list of parent task objects assigned to this user:
-    t.name, t.project (project name), t.due_date, t.completed (bool), t.tags (list),
+    t.name, t.project (project name), t.due_date, t.completed (bool),
+    t.completed_at (ISO datetime or empty), t.tags (list),
     t.is_subtask (False), t.num_subtasks (int), t.subtasks (list of subtask objects)
 
   subtasks               — flat list of all subtask objects:
-    st.name, st.project, st.due_date, st.completed (bool), st.tags (list),
-    st.is_subtask (True), st.parent_id, st.parent_name
+    st.name, st.project, st.due_date, st.completed (bool), st.completed_at (ISO datetime or empty),
+    st.tags (list), st.is_subtask (True), st.parent_id, st.parent_name
+
+  NOTE — Task Completion Over Time chart:
+    Use t.completed_at to build completion-over-time data in JavaScript:
+      const byDate = {};
+      {% for t in all_tasks %}{% if t.completed and t.completed_at %}
+      byDate["{{ t.completed_at[:10] }}"] = (byDate["{{ t.completed_at[:10] }}"] || 0) + 1;
+      {% endif %}{% endfor %}
+    Sort the keys and plot as a bar/line chart.
 
   all_tasks              — parents + subtasks combined (use for charts/summary accuracy)
 
@@ -232,6 +249,7 @@ def _schema_only(data: dict) -> dict:
                 "assignee": "<assignee_name or empty>",
                 "due_date": "<YYYY-MM-DD or empty>",
                 "completed": "<true or false>",
+                "completed_at": "<ISO datetime or empty — when the task was marked complete>",
                 "tags": ["<tag_name>"],
                 "is_subtask": False,
                 "num_subtasks": "<int>",
@@ -242,6 +260,7 @@ def _schema_only(data: dict) -> dict:
                         "assignee": "<assignee_name or empty>",
                         "due_date": "<YYYY-MM-DD or empty>",
                         "completed": "<true or false>",
+                        "completed_at": "<ISO datetime or empty>",
                         "tags": ["<tag_name>"],
                         "is_subtask": True,
                         "parent_name": "<parent_task_name>",
@@ -256,6 +275,7 @@ def _schema_only(data: dict) -> dict:
                 "assignee": "<assignee_name or empty>",
                 "due_date": "<YYYY-MM-DD or empty>",
                 "completed": "<true or false>",
+                "completed_at": "<ISO datetime or empty — when the task was marked complete>",
                 "tags": ["<tag_name>"],
                 "is_subtask": True,
                 "parent_id": "<parent_task_id>",
@@ -299,6 +319,7 @@ def _schema_only_user() -> dict:
                 "project": "<project_name>",
                 "due_date": "<YYYY-MM-DD or empty>",
                 "completed": "<true or false>",
+                "completed_at": "<ISO datetime or empty — when the task was marked complete>",
                 "tags": ["<tag_name>"],
                 "is_subtask": False,
                 "num_subtasks": "<int>",
@@ -309,6 +330,7 @@ def _schema_only_user() -> dict:
                         "project": "<project_name>",
                         "due_date": "<YYYY-MM-DD or empty>",
                         "completed": "<true or false>",
+                        "completed_at": "<ISO datetime or empty>",
                         "tags": ["<tag_name>"],
                         "is_subtask": True,
                         "parent_name": "<parent_task_name>",
@@ -323,6 +345,7 @@ def _schema_only_user() -> dict:
                 "project": "<project_name>",
                 "due_date": "<YYYY-MM-DD or empty>",
                 "completed": "<true or false>",
+                "completed_at": "<ISO datetime or empty — when the task was marked complete>",
                 "tags": ["<tag_name>"],
                 "is_subtask": True,
                 "parent_id": "<parent_task_id>",

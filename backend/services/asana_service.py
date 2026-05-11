@@ -131,7 +131,7 @@ def _build_task_summary(tasks: list, today: str) -> dict:
         1 for t in tasks
         if not t.get("completed") and t.get("due_date") and t["due_date"] < today
     )
-    
+
 
     return {
         "total_tasks": total,
@@ -172,9 +172,9 @@ async def _fetch_user_scope(
         user_email = u.get("email", "")
 
     is_self = scope_gid == me_gid
-    
+
     # Debug log to verify user info and scope resolution
-    # print("[ASANA RAW] /users/me JSON:\n" + json.dumps(me_data, indent=2, default=str)) 
+    # print("[ASANA RAW] /users/me JSON:\n" + json.dumps(me_data, indent=2, default=str))
 
     if is_self:
         # The user_task_list endpoint is the only API that returns the exact same
@@ -193,7 +193,7 @@ async def _fetch_user_scope(
         tasks_raw = await _paginate_tasks(
             client, headers,
             {
-                "opt_fields": "name,due_on,completed,tags.name,memberships.project.name,num_subtasks",
+                "opt_fields": "name,due_on,completed,completed_at,tags.name,memberships.project.name,num_subtasks",
                 "completed_since": "2000-01-01T00:00:00.000Z",
             },
             max_tasks=None,  # no cap — fetch every page to match My Tasks count exactly
@@ -208,13 +208,13 @@ async def _fetch_user_scope(
             {
                 "assignee": scope_gid,
                 "workspace": workspace["id"],
-                "opt_fields": "name,due_on,completed,tags.name,memberships.project.name,num_subtasks",
+                "opt_fields": "name,due_on,completed,completed_at,tags.name,memberships.project.name,num_subtasks",
                 "completed_since": "2000-01-01T00:00:00.000Z",
             },
             max_tasks=None,  # no cap — fetch all pages
         )
 
-    # Debug log to verify task fetching and structure before processing    
+    # Debug log to verify task fetching and structure before processing
     # print("[ASANA RAW] User tasks JSON (" + str(len(tasks_raw)) + " tasks):\n" + json.dumps(tasks_raw, indent=2, default=str))
 
     parent_tasks = []
@@ -235,6 +235,7 @@ async def _fetch_user_scope(
             "project": proj_name,
             "due_date": t.get("due_on") or "",
             "completed": t.get("completed", False),
+            "completed_at": t.get("completed_at") or "",
             "tags": tags,
             "is_subtask": False,
             "parent_id": "",
@@ -298,7 +299,7 @@ async def _fetch_subtasks(
     try:
         subtasks_raw: list = []
         fetch_params: dict = {
-            "opt_fields": "name,assignee.name,due_on,completed,tags.name,num_subtasks",
+            "opt_fields": "name,assignee.name,due_on,completed,completed_at,tags.name,num_subtasks",
             "limit": 100,
         }
         offset: str | None = None
@@ -341,6 +342,7 @@ async def _fetch_subtasks(
             "assignee": assignee.get("name", "") if isinstance(assignee, dict) else "",
             "due_date": s.get("due_on") or "",
             "completed": s.get("completed", False),
+            "completed_at": s.get("completed_at") or "",
             "tags": tags,
             "is_subtask": True,
             "parent_id": parent_task["id"],
@@ -415,7 +417,7 @@ async def _fetch_project_scope(
         {
             "project": project_gid,
             "opt_fields": (
-                "name,assignee.name,due_on,completed,tags.name,num_subtasks,"
+                "name,assignee.name,due_on,completed,completed_at,tags.name,num_subtasks,"
                 "memberships.section.name,memberships.section.gid,"
                 "memberships.project.gid"
             ),
@@ -449,6 +451,7 @@ async def _fetch_project_scope(
             "assignee": assignee.get("name", "") if isinstance(assignee, dict) else "",
             "due_date": t.get("due_on") or "",
             "completed": t.get("completed", False),
+            "completed_at": t.get("completed_at") or "",
             "tags": tags,
             "section": section_name,
             "section_gid": section_gid,
@@ -631,7 +634,7 @@ async def _fetch_all_scope(
     )
 
     print(f"Fetched all scope for workspace_id={workspace['id']}: {len(all_tasks)} tasks, {len(projects)} projects, summary={{'total_tasks': total_tasks, 'completed_tasks': completed_count, 'overdue_tasks': overdue_count}}")
-    
+
 
     return {
         "workspace": workspace,
@@ -645,7 +648,7 @@ async def _fetch_all_scope(
             "completion_rate": round(completed_count / total_tasks * 100, 1) if total_tasks else 0.0,
         },
     }
-    
+
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
